@@ -50,7 +50,101 @@ LLAMA_FRAMEWORK_SRC := $(BUILD_DIR)/arm64-apple-macosx/$(CONFIG)/llama.framework
 DEVELOPER_DIR ?= /Applications/Xcode.app/Contents/Developer
 export DEVELOPER_DIR
 
-.PHONY: app run dmg notarize-app clean
+UNAME_S        := $(shell uname -s)
+LINUX_BUILD    := .build-linux
+WHISPER_TAG    := v1.9.2
+WHISPER_DIR    := $(LINUX_BUILD)/whisper.cpp
+WHISPER_BIN    := $(WHISPER_DIR)/build/bin/whisper-server
+WHISPER_MODEL  := $(LINUX_BUILD)/models/ggml-large-v3-turbo-q5_0.bin
+PARAKEET_TAG   := v0.5.0
+PARAKEET_DIR   := $(LINUX_BUILD)/parakeet.cpp
+PARAKEET_LIB   := $(PARAKEET_DIR)/build/libparakeet.so
+NEMOTRON_MODEL := $(LINUX_BUILD)/models/nemotron-3.5-asr-streaming-0.6b-q5_k.gguf
+NEMOTRON_URL   := https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/bf0af9f425fa01809cadec671b3cb672709d13e9/nemotron-3.5-asr-streaming-0.6b-q5_k.gguf
+WL_CLIPBOARD_DIR := $(LINUX_BUILD)/wl-clipboard
+WL_COPY         := $(WL_CLIPBOARD_DIR)/usr/bin/wl-copy
+LINUX_APP_ID   := com.arunbrahma.purr
+LINUX_EXEC     := $(CURDIR)/linux/purr
+
+.DEFAULT_GOAL := all
+
+.PHONY: all app run dmg notarize-app clean linux linux-install linux-run linux-check
+
+ifeq ($(UNAME_S),Linux)
+all: linux-install
+else
+all: app
+endif
+
+# Native Linux/Wayland build. whisper.cpp stays in the ignored build directory;
+# only the thin Purr integration is tracked in this repository.
+$(WHISPER_DIR)/.git:
+	@mkdir -p $(LINUX_BUILD)
+	git clone --depth 1 --branch $(WHISPER_TAG) https://github.com/ggml-org/whisper.cpp.git $(WHISPER_DIR)
+
+$(WHISPER_BIN): $(WHISPER_DIR)/.git
+	cmake -S $(WHISPER_DIR) -B $(WHISPER_DIR)/build -G Ninja \
+	  -DCMAKE_BUILD_TYPE=Release \
+	  -DGGML_VULKAN=ON \
+	  -DWHISPER_BUILD_TESTS=OFF \
+	  -DWHISPER_BUILD_SERVER=ON \
+	  -DWHISPER_BUILD_EXAMPLES=ON
+	cmake --build $(WHISPER_DIR)/build --target whisper-server -j "$$(nproc)"
+
+$(WHISPER_MODEL): $(WHISPER_DIR)/.git
+	@mkdir -p $(LINUX_BUILD)/models
+	$(WHISPER_DIR)/models/download-ggml-model.sh large-v3-turbo-q5_0 $(LINUX_BUILD)/models
+
+$(PARAKEET_DIR)/.git:
+	@mkdir -p $(LINUX_BUILD)
+	git clone --depth 1 --branch $(PARAKEET_TAG) --recurse-submodules --shallow-submodules \
+	  https://github.com/mudler/parakeet.cpp.git $(PARAKEET_DIR)
+
+$(PARAKEET_LIB): $(PARAKEET_DIR)/.git
+	cmake -S $(PARAKEET_DIR) -B $(PARAKEET_DIR)/build -G Ninja \
+	  -DCMAKE_BUILD_TYPE=Release \
+	  -DPARAKEET_SHARED=ON \
+	  -DPARAKEET_GGML_VULKAN=ON \
+	  -DPARAKEET_BUILD_TESTS=OFF \
+	  -DPARAKEET_BUILD_CLI=ON \
+	  -DPARAKEET_BUILD_SERVER=ON
+	cmake --build $(PARAKEET_DIR)/build --target parakeet parakeet-cli parakeet-server -j "$$(nproc)"
+
+$(NEMOTRON_MODEL):
+	@mkdir -p $(LINUX_BUILD)/models
+	@partial="$@.part"; \
+	  curl --fail --location --retry 3 --continue-at - --output "$$partial" $(NEMOTRON_URL); \
+	  test "$$(stat -c %s "$$partial")" = "784801888" || { rm -f "$$partial"; echo "Nemotron download was incomplete"; exit 1; }; \
+	  mv "$$partial" "$@"
+
+$(WL_COPY):
+	@mkdir -p $(LINUX_BUILD)/wl-clipboard-pkg $(WL_CLIPBOARD_DIR)
+	@package_url="$$(pacman -Sp --print-format '%l' wl-clipboard | tail -n 1)"; \
+	  test -n "$$package_url"; \
+	  curl --fail --location --output $(LINUX_BUILD)/wl-clipboard-pkg/wl-clipboard.pkg.tar.zst "$$package_url"
+	bsdtar -xf $(LINUX_BUILD)/wl-clipboard-pkg/wl-clipboard.pkg.tar.zst -C $(WL_CLIPBOARD_DIR)
+	$(WL_COPY) --version
+
+linux: $(WHISPER_BIN) $(WHISPER_MODEL) $(PARAKEET_LIB) $(NEMOTRON_MODEL) $(WL_COPY)
+	chmod +x linux/purr
+	@echo "Built Purr for Linux (Vulkan + NVIDIA Nemotron live streaming + Whisper fallback)."
+
+linux-check: linux
+	PYTHONPATH=linux python3 -m unittest discover -s linux -p 'test_*.py' -v
+	linux/purr --smoke-test
+
+linux-install: linux linux-check
+	@mkdir -p "$(HOME)/.local/bin" "$(HOME)/.local/share/applications" "$(HOME)/.config/autostart"
+	@ln -sfn "$(LINUX_EXEC)" "$(HOME)/.local/bin/purr"
+	@sed -e 's|@PURR_EXEC@|$(LINUX_EXEC)|g' -e 's|@PURR_ICON@|$(CURDIR)/Resources/purr_app_logo.png|g' \
+	  linux/$(LINUX_APP_ID).desktop > "$(HOME)/.local/share/applications/$(LINUX_APP_ID).desktop"
+	@sed -e 's|@PURR_EXEC@|$(LINUX_EXEC)|g' -e 's|@PURR_ICON@|$(CURDIR)/Resources/purr_app_logo.png|g' \
+	  linux/$(LINUX_APP_ID)-autostart.desktop > "$(HOME)/.config/autostart/$(LINUX_APP_ID).desktop"
+	@command -v update-desktop-database >/dev/null && update-desktop-database "$(HOME)/.local/share/applications" || true
+	@echo "Installed Purr for this user. Run 'purr' or launch Purr from GNOME."
+
+linux-run: linux-install
+	linux/purr
 
 app:
 	swift build -c $(CONFIG) --arch arm64

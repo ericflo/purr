@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Purr
+Comment=Local push-to-talk voice dictation
+Exec=@PURR_EXEC@
+Icon=@PURR_ICON@
+Terminal=false
+Categories=Utility;Accessibility;
+StartupNotify=false
+X-GNOME-UsesNotifications=true

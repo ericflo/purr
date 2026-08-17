@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(readlink -f -- "$0")"
+project_dir="$(cd -- "$(dirname -- "$script_path")/.." && pwd)"
+export PURR_ROOT="$project_dir"
+exec /usr/bin/python3 "$project_dir/linux/purr_linux.py" "$@"

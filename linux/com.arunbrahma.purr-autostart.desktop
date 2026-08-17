@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Purr
+Comment=Local push-to-talk voice dictation
+Exec=@PURR_EXEC@ --background
+Icon=@PURR_ICON@
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3

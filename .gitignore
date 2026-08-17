@@ -1,4 +1,6 @@
 .build/
+.build-linux/
+__pycache__/
 .swiftpm/
 DerivedData/
 build/
