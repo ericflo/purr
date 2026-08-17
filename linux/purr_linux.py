@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small Linux/Wayland implementation of Purr's push-to-talk dictation."""
+"""Small Linux/Wayland implementation of Purr's local dictation."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("AyatanaAppIndicator3", "0.1")
 from gi.repository import AyatanaAppIndicator3 as AppIndicator
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk
 
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
@@ -77,6 +77,7 @@ DEFAULT_CONFIG = {
     "language": "en",
     "model": DEFAULT_MODEL_ID,
     "live_typing": True,
+    "show_overlay": False,
     "microphone": "default",
     "trim_fillers": True,
     "voice_commands": True,
@@ -562,7 +563,7 @@ class GlobalShortcuts:
             dbus.String("dictate"),
             dbus.Dictionary(
                 {
-                    "description": dbus.String("Hold to dictate with Purr"),
+                    "description": dbus.String("Dictate with Purr"),
                     "preferred_trigger": dbus.String("CTRL+ALT+space"),
                 },
                 signature="sv",
@@ -627,6 +628,45 @@ class GlobalShortcuts:
             pass
 
 
+class GnomeShortcut:
+    """A native GNOME custom shortcut that emits one toggle action per press."""
+
+    PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/purr/"
+    SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
+    CUSTOM_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
+
+    def __init__(self, on_status):
+        self.on_status = on_status
+        self.binding = "<Control><Alt>space"
+
+    def start(self) -> None:
+        settings = Gio.Settings.new(self.SCHEMA)
+        paths = list(settings.get_strv("custom-keybindings"))
+        shortcut = Gio.Settings.new_with_path(self.CUSTOM_SCHEMA, self.PATH)
+        if self.PATH not in paths:
+            shortcut.set_string("name", "Purr Dictation")
+            shortcut.set_string("binding", self.binding)
+            settings.set_strv("custom-keybindings", [*paths, self.PATH])
+        elif shortcut.get_string("binding"):
+            self.binding = shortcut.get_string("binding")
+        shortcut.set_string("command", f"gapplication action {APP_ID} dictate")
+        Gio.Settings.sync()
+        self.on_status(f"Ready — tap Press {self.binding}", False)
+
+    def configure(self) -> None:
+        try:
+            subprocess.Popen(
+                ["gnome-control-center", "keyboard"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as error:
+            self.on_status(f"Could not open GNOME keyboard settings: {error}", True)
+
+    def close(self) -> None:
+        pass
+
+
 class PurrApplication(Gtk.Application):
     def __init__(self, background: bool):
         super().__init__(application_id=APP_ID, flags=0)
@@ -637,7 +677,7 @@ class PurrApplication(Gtk.Application):
         self.server, self.model = create_engine(self.config, BUILD, STATE, self.store)
         self.keyboard: UInputKeyboard | None = None
         self.inserter: TextInserter | None = None
-        self.shortcuts: GlobalShortcuts | None = None
+        self.shortcuts: GnomeShortcut | None = None
         self.recorder: subprocess.Popen | None = None
         self.recording_path: Path | None = None
         self.stream_thread: threading.Thread | None = None
@@ -647,8 +687,13 @@ class PurrApplication(Gtk.Application):
         self.shortcut_description: str | None = None
         self.last_inserted = ""
         self.stream_typed = ""
+        self.stream_raw = ""
         self.stream_external_drops = 0
         self.stream_direct_failed = False
+        self.shortcut_down = False
+        self.shortcut_pressed_at = 0.0
+        self.pending_toggle_stop = False
+        self.recording_token = 0
         self.window = self.overlay = None
         self.status_label = self.last_label = self.overlay_label = None
         self.record_button = self.model_combo = self.model_action = None
@@ -661,6 +706,9 @@ class PurrApplication(Gtk.Application):
         self.hold()
         self._install_css()
         self._build_indicator()
+        dictate_action = Gio.SimpleAction.new("dictate", None)
+        dictate_action.connect("activate", self._native_shortcut)
+        self.add_action(dictate_action)
         try:
             self.keyboard = UInputKeyboard()
             self.inserter = TextInserter(self.keyboard)
@@ -668,9 +716,7 @@ class PurrApplication(Gtk.Application):
             LOG.exception("uinput setup failed")
             self._set_status(f"Text injection unavailable: {error}", True)
         try:
-            self.shortcuts = GlobalShortcuts(
-                self.start_recording, self.stop_recording, self._shortcut_status
-            )
+            self.shortcuts = GnomeShortcut(self._shortcut_status)
             self.shortcuts.start()
         except Exception as error:
             LOG.exception("Global shortcut setup failed")
@@ -717,6 +763,9 @@ class PurrApplication(Gtk.Application):
         configure = Gtk.MenuItem(label="Change Dictation Shortcut…")
         configure.connect("activate", lambda _item: self.shortcuts and self.shortcuts.configure())
         menu.append(configure)
+        dictate = Gtk.MenuItem(label="Start / Stop Dictation")
+        dictate.connect("activate", lambda _item: self._toggle_recording(None))
+        menu.append(dictate)
         menu.append(Gtk.SeparatorMenuItem())
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", lambda _item: self.quit())
@@ -874,6 +923,8 @@ class PurrApplication(Gtk.Application):
         self.overlay.add(frame)
 
     def _show_overlay(self, text: str = "Speak now…") -> None:
+        if not self.config.get("show_overlay", False):
+            return
         if not self.overlay:
             self._build_overlay()
         self.overlay_label.set_text(text)
@@ -896,6 +947,30 @@ class PurrApplication(Gtk.Application):
     def _toggle_recording(self, _button) -> None:
         self.stop_recording() if self.recorder else self.start_recording()
 
+    def _native_shortcut(self, _action, _parameter) -> None:
+        now = time.monotonic()
+        # GNOME normally invokes a custom shortcut once per press. If a keyboard
+        # does repeat it, keep extending this guard so a held key cannot toggle
+        # dictation back off.
+        if now - self.shortcut_pressed_at < 0.8:
+            self.shortcut_pressed_at = now
+            return
+        self.shortcut_pressed_at = now
+        self.shortcut_down = True
+        self.pending_toggle_stop = bool(self.recorder)
+        # Let the physical Ctrl+Alt keys come up before either live typing begins
+        # or the final stream tail is sent through the virtual keyboard.
+        GLib.timeout_add(220, self._finish_native_shortcut)
+
+    def _finish_native_shortcut(self) -> bool:
+        self.shortcut_down = False
+        if self.pending_toggle_stop:
+            self.pending_toggle_stop = False
+            self.stop_recording()
+        else:
+            self.start_recording()
+        return False
+
     def _set_status(self, text: str, error: bool = False) -> bool:
         LOG.error(text) if error else LOG.info(text)
         if self.status_label:
@@ -909,12 +984,12 @@ class PurrApplication(Gtk.Application):
 
     def _ready_status(self) -> str:
         shortcut = self.shortcut_description or "the configured shortcut"
-        return f"Ready — hold {shortcut}  ·  {self.server.backend_label}"
+        return f"Ready — tap {shortcut}  ·  {self.server.backend_label}"
 
     def _shortcut_status(self, text: str, error: bool = False) -> bool:
         if error:
             return self._set_status(text, True)
-        self.shortcut_description = text.removeprefix("Ready — hold ")
+        self.shortcut_description = text.removeprefix("Ready — hold ").removeprefix("Ready — tap ")
         return self._set_status(
             self._ready_status() if self.ready else
             f"Shortcut set to {self.shortcut_description}; loading model…"
@@ -975,6 +1050,7 @@ class PurrApplication(Gtk.Application):
             RUNTIME.mkdir(parents=True, exist_ok=True)
             source = self._default_source()
             self.stream_typed = ""
+            self.stream_raw = ""
             self.stream_external_drops = 0
             self.stream_direct_failed = False
             self._show_overlay()
@@ -1000,10 +1076,12 @@ class PurrApplication(Gtk.Application):
                     ],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-            self._set_status("Listening… release the shortcut when finished")
+            self._set_status("Listening live… tap the shortcut again to finish")
             self.indicator.set_icon_full("media-record-symbolic", "Purr is listening")
             if self.record_button:
                 self.record_button.set_label("Stop Dictation")
+            self.recording_token += 1
+            GLib.timeout_add_seconds(180, self._recording_watchdog, self.recording_token)
         except Exception as error:
             LOG.exception("Could not start microphone")
             self.recorder = None
@@ -1039,6 +1117,13 @@ class PurrApplication(Gtk.Application):
                 self._transcribe(path)
 
             threading.Thread(target=finish_recording, daemon=True).start()
+
+    def _recording_watchdog(self, token: int) -> bool:
+        if token == self.recording_token and self.recorder:
+            LOG.error("Recording watchdog finalized a stuck three-minute session")
+            self._notify("Purr finalized a stuck recording", "The stop shortcut was not received.")
+            self.stop_recording()
+        return False
 
     def _consume_stream(self, recorder, stream) -> None:
         raw_text = ""
@@ -1089,12 +1174,22 @@ class PurrApplication(Gtk.Application):
         GLib.idle_add(self._stream_finished, raw_text, duration, peak_db, error)
 
     def _stream_update(self, raw: str, eou: bool, eob: bool, final: bool) -> bool:
+        self.stream_raw = raw
         text, drop_previous = self.processor.apply(raw)
         preview = text or ("End of utterance…" if eou else "Listening…")
         if self.overlay_label:
             self.overlay_label.set_text(preview)
         if self.last_label:
             self.last_label.set_text(text or "Listening…")
+        live_safe = (
+            not self.shortcut_down
+            and not self.pending_toggle_stop
+        )
+        if live_safe:
+            self._apply_stream_typing(text, drop_previous)
+        return False
+
+    def _apply_stream_typing(self, text: str, drop_previous: int) -> None:
         direct = bool(self.config.get("live_typing", True)) and self.keyboard
         if direct and not self.stream_direct_failed:
             if drop_previous > self.stream_external_drops:
@@ -1116,19 +1211,22 @@ class PurrApplication(Gtk.Application):
                 self.stream_direct_failed = True
             else:
                 self.stream_typed = text
-        return False
 
     def _stream_finished(
         self, raw: str, duration: float, peak_db: float, error: str | None
     ) -> bool:
         if self.shutting_down:
             return False
+        self.recorder = None
+        self.pending_toggle_stop = False
+        if self.record_button:
+            self.record_button.set_label("Start Dictation")
         if error:
             if self.stream_typed and self.keyboard:
                 self.keyboard.backspace(len(self.stream_typed))
             return self._complete("", 0, error)
         if duration < 0.20:
-            return self._complete("", 0, "Too short — hold the shortcut while speaking")
+            return self._complete("", 0, "Too short — speak for a moment before stopping")
         if peak_db < -55:
             if self.stream_typed and self.keyboard:
                 self.keyboard.backspace(len(self.stream_typed))
@@ -1136,7 +1234,10 @@ class PurrApplication(Gtk.Application):
         self._stream_update(raw, False, False, True)
         text, drop_previous = self.processor.apply(raw)
         LOG.info("Live transcript final=%r", text)
-        direct_ok = bool(self.config.get("live_typing", True)) and not self.stream_direct_failed
+        direct_ok = (
+            bool(self.config.get("live_typing", True))
+            and not self.stream_direct_failed
+        )
         if direct_ok and self.keyboard:
             if text:
                 self.keyboard.type_text(" ")
@@ -1158,7 +1259,7 @@ class PurrApplication(Gtk.Application):
             with wave.open(str(path), "rb") as audio:
                 duration = audio.getnframes() / audio.getframerate()
             if duration < 0.20:
-                GLib.idle_add(self._complete, "", 0, "Too short — hold the shortcut while speaking")
+                GLib.idle_add(self._complete, "", 0, "Too short — speak for a moment before stopping")
                 return
             peak_db, rms_db = normalize_wav(path)
             LOG.info("Captured %.2fs, peak %.1f dBFS, RMS %.1f dBFS", duration, peak_db, rms_db)
@@ -1186,7 +1287,7 @@ class PurrApplication(Gtk.Application):
         if message:
             self._hide_overlay()
             self._set_status(message, message.startswith(("No microphone", "Transcription", "Could not")))
-            if message not in ("No speech detected", "Too short — hold the shortcut while speaking"):
+            if message not in ("No speech detected", "Too short — speak for a moment before stopping"):
                 self._notify("Purr dictation failed", message)
             return False
         if drop_previous and self.keyboard:

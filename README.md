@@ -98,16 +98,15 @@ While a meeting is recording, the dictation hotkey is suspended so a reflexive p
 On Linux, `make linux-install` builds pinned parakeet.cpp and whisper.cpp engines
 with Vulkan, downloads NVIDIA Nemotron 3.5 Streaming Q5 plus Whisper Large V3
 Turbo Q5 as a fallback, installs a launcher and sign-in autostart entry, and runs
-local checks. The first launch asks GNOME to approve a global shortcut
-(Ctrl+Alt+Space is suggested).
+local checks. Installation adds Ctrl+Alt+Space as a native GNOME shortcut. Tap
+once to begin live dictation and tap again to finish.
 
-Nemotron is the default: while the shortcut is held, cache-aware transcription
-appears in a small non-focus-stealing overlay and is typed directly into the
-focused application through Purr's virtual keyboard. Linux Unicode compose is
-used for accents, symbols, and non-Latin text, avoiding background Wayland
-clipboard restrictions. Say “scratch that” to remove the preceding dictated
-word immediately. On release Purr finalizes the stream. The GUI can download,
-select, and remove these additional local models:
+Nemotron is the default: after the first tap, cache-aware transcription is typed
+directly into the focused application through Purr's virtual keyboard. Linux
+Unicode compose is used for accents, symbols, and non-Latin text, avoiding
+background Wayland clipboard restrictions. Say “scratch that” to remove the
+preceding dictated word immediately. The second tap finalizes the stream. The
+GUI can download, select, and remove these additional local models:
 
 - NVIDIA Parakeet Realtime EOU 120M (English live streaming)
 - NVIDIA Parakeet TDT 0.6B V2 (English batch accuracy)

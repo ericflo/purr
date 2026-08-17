@@ -4,7 +4,13 @@ from pathlib import Path
 import unittest
 import wave
 
-from purr_linux import PostProcessor, UInputKeyboard, multipart_body, normalize_wav
+from purr_linux import (
+    PostProcessor,
+    PurrApplication,
+    UInputKeyboard,
+    multipart_body,
+    normalize_wav,
+)
 from purr_models import ModelSpec, ModelStore
 
 
@@ -66,6 +72,35 @@ class AudioTests(unittest.TestCase):
 
 
 class LinuxIntegrationTests(unittest.TestCase):
+    def test_live_typing_waits_for_shortcut_modifiers_to_be_released(self):
+        class Keyboard:
+            def __init__(self):
+                self.typed = []
+
+            def type_text(self, text):
+                self.typed.append(text)
+                return True
+
+        app = PurrApplication.__new__(PurrApplication)
+        app.config = {"live_typing": True}
+        app.processor = PostProcessor(app.config)
+        app.keyboard = Keyboard()
+        app.overlay_label = app.last_label = None
+        app.stream_raw = app.stream_typed = ""
+        app.stream_external_drops = 0
+        app.stream_direct_failed = False
+        app.pending_toggle_stop = False
+        app.shortcut_down = True
+
+        app._stream_update("hello", False, False, False)
+        self.assertEqual(app.keyboard.typed, [])
+        self.assertEqual(app.stream_typed, "")
+
+        app.shortcut_down = False
+        app._stream_update("hello", False, False, False)
+        self.assertEqual(app.keyboard.typed, ["hello"])
+        self.assertEqual(app.stream_typed, "hello")
+
     def test_live_keyboard_supports_unicode_and_rejects_controls(self):
         keyboard = UInputKeyboard.__new__(UInputKeyboard)
         self.assertTrue(keyboard.can_type("Purr live, scratch that!\n"))
