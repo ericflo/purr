@@ -637,7 +637,7 @@ class GnomeShortcut:
 
     def __init__(self, on_status):
         self.on_status = on_status
-        self.binding = "F8"
+        self.binding = "<Control><Alt>space"
 
     def start(self) -> None:
         settings = Gio.Settings.new(self.SCHEMA)
@@ -649,10 +649,9 @@ class GnomeShortcut:
             settings.set_strv("custom-keybindings", [*paths, self.PATH])
         else:
             existing = shortcut.get_string("binding")
-            # Migrate the modifier chord installed by the first Linux build.
-            # Physical Ctrl+Alt state can turn virtual text into application
-            # shortcuts; a plain function key cannot contaminate dictation.
-            if existing in ("", "<Control><Alt>space"):
+            # Migrate F8, which was briefly used while diagnosing the actual
+            # focus-stealing bug. Preserve any other user-selected binding.
+            if existing in ("", "F8"):
                 shortcut.set_string("binding", self.binding)
             else:
                 self.binding = existing
@@ -970,7 +969,7 @@ class PurrApplication(Gtk.Application):
         self.pending_toggle_stop = bool(self.recorder)
         # Give GNOME time to finish dispatching the shortcut before live typing
         # begins or the final stream tail is sent through the virtual keyboard.
-        GLib.timeout_add(220, self._finish_native_shortcut)
+        GLib.timeout_add(600, self._finish_native_shortcut)
 
     def _finish_native_shortcut(self) -> bool:
         self.shortcut_down = False
