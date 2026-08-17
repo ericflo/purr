@@ -637,7 +637,7 @@ class GnomeShortcut:
 
     def __init__(self, on_status):
         self.on_status = on_status
-        self.binding = "<Control><Alt>space"
+        self.binding = "F8"
 
     def start(self) -> None:
         settings = Gio.Settings.new(self.SCHEMA)
@@ -647,8 +647,15 @@ class GnomeShortcut:
             shortcut.set_string("name", "Purr Dictation")
             shortcut.set_string("binding", self.binding)
             settings.set_strv("custom-keybindings", [*paths, self.PATH])
-        elif shortcut.get_string("binding"):
-            self.binding = shortcut.get_string("binding")
+        else:
+            existing = shortcut.get_string("binding")
+            # Migrate the modifier chord installed by the first Linux build.
+            # Physical Ctrl+Alt state can turn virtual text into application
+            # shortcuts; a plain function key cannot contaminate dictation.
+            if existing in ("", "<Control><Alt>space"):
+                shortcut.set_string("binding", self.binding)
+            else:
+                self.binding = existing
         shortcut.set_string("command", f"gapplication action {APP_ID} dictate")
         Gio.Settings.sync()
         self.on_status(f"Ready — tap Press {self.binding}", False)
@@ -724,11 +731,14 @@ class PurrApplication(Gtk.Application):
         threading.Thread(target=self._start_server, daemon=True).start()
 
     def do_activate(self) -> None:
+        if self.background:
+            # Autostart must not construct (and show) the settings window: a
+            # mapped Wayland toplevel takes focus away from the dictation target.
+            self.background = False
+            return
         if not self.window:
             self._build_window()
-        if not self.background:
-            self.window.present()
-        self.background = False
+        self.window.present()
 
     @staticmethod
     def _install_css() -> None:
@@ -958,8 +968,8 @@ class PurrApplication(Gtk.Application):
         self.shortcut_pressed_at = now
         self.shortcut_down = True
         self.pending_toggle_stop = bool(self.recorder)
-        # Let the physical Ctrl+Alt keys come up before either live typing begins
-        # or the final stream tail is sent through the virtual keyboard.
+        # Give GNOME time to finish dispatching the shortcut before live typing
+        # begins or the final stream tail is sent through the virtual keyboard.
         GLib.timeout_add(220, self._finish_native_shortcut)
 
     def _finish_native_shortcut(self) -> bool:
@@ -1199,8 +1209,9 @@ class PurrApplication(Gtk.Application):
             limit = min(len(self.stream_typed), len(text))
             while common < limit and self.stream_typed[common] == text[common]:
                 common += 1
-            if common < len(self.stream_typed):
-                self.keyboard.backspace(len(self.stream_typed) - common)
+            removed = len(self.stream_typed) - common
+            if removed:
+                self.keyboard.backspace(removed)
             addition = text[common:]
             if addition and not self.keyboard.type_text(addition):
                 # Roll the partial direct transcript back; final insertion will use
@@ -1211,6 +1222,11 @@ class PurrApplication(Gtk.Application):
                 self.stream_direct_failed = True
             else:
                 self.stream_typed = text
+                if addition or removed:
+                    LOG.info(
+                        "Live injection updated: +%d chars, -%d chars, %d total",
+                        len(addition), removed, len(text),
+                    )
 
     def _stream_finished(
         self, raw: str, duration: float, peak_db: float, error: str | None

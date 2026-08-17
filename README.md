@@ -98,8 +98,8 @@ While a meeting is recording, the dictation hotkey is suspended so a reflexive p
 On Linux, `make linux-install` builds pinned parakeet.cpp and whisper.cpp engines
 with Vulkan, downloads NVIDIA Nemotron 3.5 Streaming Q5 plus Whisper Large V3
 Turbo Q5 as a fallback, installs a launcher and sign-in autostart entry, and runs
-local checks. Installation adds Ctrl+Alt+Space as a native GNOME shortcut. Tap
-once to begin live dictation and tap again to finish.
+local checks. Installation adds F8 as a native GNOME shortcut. Tap once to begin
+live dictation and tap again to finish.
 
 Nemotron is the default: after the first tap, cache-aware transcription is typed
 directly into the focused application through Purr's virtual keyboard. Linux

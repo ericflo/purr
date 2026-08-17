@@ -72,6 +72,20 @@ class AudioTests(unittest.TestCase):
 
 
 class LinuxIntegrationTests(unittest.TestCase):
+    def test_background_activation_does_not_build_a_focus_stealing_window(self):
+        class BackgroundApp:
+            background = True
+            window = None
+            built = False
+
+            def _build_window(self):
+                self.built = True
+
+        app = BackgroundApp()
+        PurrApplication.do_activate(app)
+        self.assertFalse(app.background)
+        self.assertFalse(app.built)
+
     def test_live_typing_waits_for_shortcut_modifiers_to_be_released(self):
         class Keyboard:
             def __init__(self):
