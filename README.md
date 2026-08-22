@@ -25,27 +25,17 @@ no cloud transcription.
 > Arun's work. This fork adds the native Linux implementation while preserving
 > the original MIT license and copyright notice.
 
-## macOS screenshots
+## Linux screenshots
 
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="Resources/screenshots/onboarding.png" alt="Onboarding and permissions"><br>
-      <sub>Onboarding &amp; permissions</sub>
+      <img src="Resources/screenshots/linux-settings.png" alt="Purr Linux settings with local Nemotron streaming model"><br>
+      <sub>Local model, language, microphone, and typing controls</sub>
     </td>
     <td align="center" width="50%">
-      <img src="Resources/screenshots/general-settings.png" alt="General settings"><br>
-      <sub>General settings</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="Resources/screenshots/features-settings.png" alt="Features settings"><br>
-      <sub>Features settings</sub>
-    </td>
-    <td align="center">
-      <img src="Resources/screenshots/customization-settings.png" alt="Customization settings"><br>
-      <sub>Customization settings</sub>
+      <img src="Resources/screenshots/linux-live-dictation.png" alt="Purr Linux performing live local dictation"><br>
+      <sub>Live transcription with direct Wayland typing</sub>
     </td>
   </tr>
 </table>
