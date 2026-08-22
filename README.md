@@ -6,17 +6,26 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)](#)
+[![Linux: GNOME Wayland](https://img.shields.io/badge/Linux-GNOME%20Wayland-4a86cf?logo=linux)](LINUX.md)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-orange)](#)
 [![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)](#)
-[![Engine: Parakeet TDT v2](https://img.shields.io/badge/Engine-Parakeet%20TDT%20v2-purple)](#)
+[![Local ASR](https://img.shields.io/badge/ASR-Parakeet%20%2B%20Whisper-purple)](#)
 
-### Hold a key. Speak. Your words type into any text field - 100% local, on-device.
+### Press a shortcut. Speak. Your words type into any text field - 100% local, on-device.
 
 </div>
 
-Local voice-to-text dictation for macOS Apple Silicon. A free, MIT-licensed alternative to paid commercial dictation apps, with no telemetry and no cloud round-trips.
+Local voice-to-text dictation for macOS Apple Silicon and GNOME/Wayland Linux.
+A free, MIT-licensed alternative to paid dictation apps, with no telemetry and
+no cloud transcription.
 
-## Screenshots
+> [!NOTE]
+> This is a Linux-focused fork of [Arun Brahma's original Purr](https://github.com/iamarunbrahma/purr).
+> The original macOS application, name, artwork, and most of the project are
+> Arun's work. This fork adds the native Linux implementation while preserving
+> the original MIT license and copyright notice.
+
+## macOS screenshots
 
 <table>
   <tr>
@@ -41,7 +50,32 @@ Local voice-to-text dictation for macOS Apple Silicon. A free, MIT-licensed alte
   </tr>
 </table>
 
-## QuickStart
+## Quick start
+
+### Linux (GNOME Wayland)
+
+The Linux port is currently source-built and tested on x86_64 Arch Linux with
+GNOME Wayland and Vulkan. Install the dependencies and the Vulkan driver for
+your GPU first; the complete package list and troubleshooting notes are in
+[LINUX.md](LINUX.md).
+
+```bash
+git clone https://github.com/ericflo/purr.git
+cd purr
+make linux-install
+purr
+```
+
+The first build downloads and compiles pinned versions of `parakeet.cpp` and
+`whisper.cpp`, then downloads about 1.3 GiB of default model weights. It also
+installs a per-user desktop launcher, sign-in autostart entry, and the native
+GNOME <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> shortcut. Tap the shortcut
+to start dictation and tap it again to stop.
+
+### macOS (Apple Silicon, upstream)
+
+The signed macOS release and its updater are maintained by the original
+project. For that version, build or download upstream Purr:
 
 ```bash
 git clone https://github.com/iamarunbrahma/purr.git
@@ -57,7 +91,12 @@ First launch:
 2. Click into any text field, hold **Right Option**, speak, release.
 3. First launch downloads the ~450 MB Parakeet model in the background; once it finishes, dictation is near-instant.
 
-## Hot Keys
+## Hotkeys
+
+On Linux, tap <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> to start or stop
+dictation. The settings window links to GNOME's keyboard shortcut settings.
+
+The macOS app provides these additional modes:
 
 | Action      | Default | Behavior                                       |
 | ----------- | ------- | ---------------------------------------------- |
@@ -74,6 +113,8 @@ While a meeting is recording, the dictation hotkey is suspended so a reflexive p
 ## Features
 
 - **Two transcription engines**: Parakeet TDT v2 (default) is English-only, on-device, and the fastest option on Apple Silicon. Switch to WhisperKit (Whisper Tiny EN through Large V3 Turbo) when you need another language.
+- **Native Linux live transcription**: Nemotron 3.5 Streaming is the default on Linux, with cache-aware partial results, punctuation, capitalization, prompt-selected multilingual recognition, and a Whisper Large V3 Turbo fallback.
+- **Wayland-safe text injection**: Finalized words are typed through a local virtual keyboard. Unicode compose handles accents, symbols, and non-Latin text without relying on background clipboard access.
 - **Smart Typing**: With Parakeet, words appear live in the focused app as you speak instead of only landing on key release. Each phrase stays separately undoable and coexists cleanly with autocorrect and IMEs.
 - **Meeting mode**: Captures your mic and your Mac's system audio together, so everyone on a call is transcribed. Echo cancellation and offline speaker diarization (FluidAudio) label each voice, and transcripts save as Markdown to a folder you choose.
 - **Meeting summaries**: Each meeting can save a sidecar `.summary.md` with a TL;DR, decisions, action items, and notes. Uses Apple's on-device model on macOS 26+, or Gemma 3 4B locally on older systems.
@@ -82,24 +123,22 @@ While a meeting is recording, the dictation hotkey is suspended so a reflexive p
 - **Custom dictionary**: Teach Purr the proper nouns and acronyms it keeps mishearing - map "fluid audio" to "FluidAudio" or "ts" to "TypeScript".
 - **Filler trimming**: "um", "uh", and "er" are stripped automatically; add your own filler words in Settings.
 - **Flexible hotkeys**: Pick each feature's trigger from a few built-in presets - a bare modifier, a modifier combo, or a function key.
-- **Native and private**: Pure Swift and SwiftUI (no Electron, no Tauri), with everything running on-device and zero telemetry.
+- **Native and private**: Swift/SwiftUI on macOS and Python/GTK on Linux (no Electron or Tauri), with inference running on-device and zero telemetry.
 
 ## Compatibility
 
-| Platform                                       | Status                                                       |
-| ---------------------------------------------- | ------------------------------------------------------------ |
-| macOS 14+ on Apple Silicon (M1, M2, M3, M4)    | Supported                                                    |
-| Linux / GNOME Wayland (local build)             | Live local dictation; `make linux-install`                   |
-| macOS 14+ on Intel                             | Not supported (Apple Silicon only - CoreML / ANE)            |
-| macOS 13 or earlier                            | Not supported (uses Sonoma+ APIs)                            |
-| Windows                                        | Not planned (CGEventTap, Accessibility, ANE are Apple-only)  |
-| iOS / iPadOS                                   | Not planned (designed as a menu bar app)                     |
+| Platform | Status |
+| --- | --- |
+| Arch Linux x86_64, GNOME Wayland, Vulkan | Supported by this fork as a source build |
+| Other Linux distributions or desktops | Not packaged or tested yet |
+| macOS 14+ on Apple Silicon (M1 or newer) | Supported by the original app |
+| macOS on Intel or macOS 13 and earlier | Not supported; the macOS engine requires CoreML/ANE and Sonoma+ APIs |
+| Windows, iOS, and iPadOS | Not supported |
 
-On Linux, `make linux-install` builds pinned parakeet.cpp and whisper.cpp engines
-with Vulkan, downloads NVIDIA Nemotron 3.5 Streaming Q5 plus Whisper Large V3
-Turbo Q5 as a fallback, installs a launcher and sign-in autostart entry, and runs
-local checks. Installation adds Ctrl+Alt+Space as a native GNOME shortcut. Tap
-once to begin live dictation and tap again to finish.
+On Linux, `make linux-install` builds pinned `parakeet.cpp` and `whisper.cpp`
+engines with Vulkan, downloads NVIDIA Nemotron 3.5 Streaming Q5 plus Whisper
+Large V3 Turbo Q5 as a fallback, installs the user launcher and autostart entry,
+and runs the test and smoke-test suite.
 
 Nemotron is the default: after the first tap, cache-aware transcription is typed
 directly into the focused application through Purr's virtual keyboard. Linux
@@ -115,51 +154,67 @@ GUI can download, select, and remove these additional local models:
 - Whisper Large V3 Turbo (broad-language compatibility fallback)
 
 Purr starts automatically on sign-in and keeps running in the top bar when its
-window is closed. Linux settings are stored in `~/.config/purr/config.json`;
-supported keys include `model`, `language`, `microphone`, `live_typing`,
-`trim_fillers`, `voice_commands`, `dictionary`, and `initial_prompt`.
+window is closed. See [the Linux guide](LINUX.md) for prerequisites, model
+sizes, settings, local files, update/uninstall steps, architecture, and common
+failure modes.
 
 ## FAQs
 
 <details>
-<summary><strong>Does my audio leave my Mac?</strong></summary>
+<summary><strong>Does my audio leave my computer?</strong></summary>
 
-No. Recording, transcription, and post-processing all happen on-device (transcription runs on the Apple Neural Engine). Zero telemetry, and zero network calls after the initial model download.
+No. Recording, transcription, and post-processing happen on-device. macOS uses
+the Apple Neural Engine; Linux uses local Vulkan inference (or Whisper's CPU
+fallback). There is no telemetry and no cloud transcription. Network access is
+used to fetch source dependencies, models, and macOS updates.
 
 </details>
 
 <details>
 <summary><strong>Which mode is lowest-latency?</strong></summary>
 
-Parakeet (the default) with Smart Typing on, so words appear as you speak instead of on key release. Whisper can't match it because it's non-streaming.
+Use Parakeet with live typing enabled, so finalized words appear as you speak.
+On Linux, the default Nemotron model and optional Realtime EOU model stream;
+the batch Parakeet models and Whisper wait until the utterance finishes.
 
 </details>
 
 <details>
 <summary><strong>What languages can I dictate in?</strong></summary>
 
-English with the default Parakeet engine. For other languages, switch to WhisperKit in Settings > Engine - it transcribes ~100 languages (auto-detected or pinned) and can optionally translate them to English.
+On macOS, the default Parakeet engine is English-only; WhisperKit supports
+roughly 100 languages. On Linux, Nemotron supports 40+ prompted locales, the
+Parakeet V3 option supports 25 European languages, and Whisper provides the
+broadest compatibility. Select the language and model in the window.
 
 </details>
 
 <details>
 <summary><strong>Does meeting mode record the other people on my call?</strong></summary>
 
-Yes - it captures your mic and your Mac's system audio together, so remote participants are transcribed too, still entirely on-device. System-audio capture needs macOS 14.2+; older systems record the mic only.
+On macOS, yes: it captures your microphone and system audio together, still
+entirely on-device. System-audio capture needs macOS 14.2+. Meeting mode has not
+been ported to Linux.
 
 </details>
 
 <details>
 <summary><strong>The mic icon isn't visible in my menu bar.</strong></summary>
 
-On notched MacBooks the icon hides behind the notch when the menu bar is crowded. Hold Command and drag to reorder, quit a few menu bar apps, or use [Ice](https://github.com/jordanbaird/Ice) / Bartender to manage overflow.
+On notched MacBooks the icon can hide behind the notch when the menu bar is
+crowded. On GNOME, make sure the AppIndicator extension is enabled and
+`libayatana-appindicator` is installed; [LINUX.md](LINUX.md) includes both
+packages.
 
 </details>
 
 <details>
 <summary><strong>How big is the model download?</strong></summary>
 
-Parakeet TDT v2 is ~450 MB, fetched automatically on first launch. Whisper models range from ~140 MB (Tiny) to ~616 MB (Large V3 Turbo) if you switch engines.
+On macOS, the default Parakeet model is about 450 MB. The Linux build downloads
+about 1.3 GiB for Nemotron and the Whisper fallback and currently occupies
+about 2.3 GiB including compiled engines; optional Linux models are 135–708 MB
+each.
 
 </details>
 
@@ -173,21 +228,27 @@ Yes, after the first model download. Everything runs on-device.
 <details>
 <summary><strong>Can I change the hotkey?</strong></summary>
 
-Yes - pick from a few built-in presets per feature in Settings (e.g. Right Option, F5, or ⌃⌥ Space for dictation). There's no custom recorder yet, so keys outside the presets can't be assigned.
+On macOS, pick from the built-in presets in Settings. On Linux, click
+**Shortcut…** to open GNOME keyboard settings; the installed default is
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd>.
 
 </details>
 
 <details>
 <summary><strong>Can I use it in any app?</strong></summary>
 
-Any standard text field. Voice editing works in Accessibility-supported fields (most native macOS apps); other apps fall back to paste injection.
+Dictation works in standard text fields. On Linux, direct typing works in GTK,
+Chromium/Electron, and other applications that accept normal keyboard input;
+Unicode compose support varies by toolkit. Voice editing is currently macOS-only.
 
 </details>
 
 <details>
 <summary><strong>How do I update Purr?</strong></summary>
 
-Open the menu bar > About Purr and it checks GitHub Releases automatically (or click "Check for Updates"). A new version downloads, verifies its checksum, and relaunches in place.
+On Linux, quit Purr and run `git pull --ff-only && make linux-install` in the
+checkout. On macOS, open **About Purr > Check for Updates**; the signed upstream
+release downloads, verifies its checksum, and relaunches in place.
 
 </details>
 
@@ -200,6 +261,9 @@ Either the bundle ID changed (e.g. you swapped in a different fork) or you revok
 
 <details>
 <summary><strong>How do I delete the models or fully uninstall Purr?</strong></summary>
+
+For Linux, follow [the update and uninstall guide](LINUX.md#updating-and-uninstalling).
+The steps below apply to macOS.
 
 To reclaim disk space without uninstalling, open **Settings > Customization > Models** and click **Delete Models**. It removes every downloaded model (Parakeet, Whisper, the diarizer, and Gemma) while keeping your meeting transcripts and preferences; the models re-download automatically the next time a feature needs them.
 
@@ -214,7 +278,12 @@ macOS can't run cleanup code when an app is dragged to the Trash, so those are t
 
 </details>
 
-## License
+## Project lineage and license
+
+This fork is based on [Purr by Arun Brahma](https://github.com/iamarunbrahma/purr).
+The Linux port lives in `linux/` plus the Linux targets in the `Makefile`; the
+commit history records the fork's changes. Upstream sponsorship remains linked
+through [`.github/FUNDING.yml`](.github/FUNDING.yml).
 
 Purr itself is MIT-licensed. Copyright (c) 2026 Arun Brahma. See [LICENSE](LICENSE).
 
@@ -234,3 +303,6 @@ Purr builds on open-source work in two categories, handled differently.
 - **FluidAudio** (FluidInference) - Apache-2.0. Runs Parakeet transcription and the meeting-mode speaker diarization model.
 - **llama.cpp** (ggml-org) - MIT, embedded as an Apple XCFramework; runs the Gemma summaries.
 - **SpeexDSP** (Xiph.Org) - BSD-3-Clause, vendored from source for meeting echo cancellation.
+- **parakeet.cpp** (LocalAI contributors) - MIT, compiled from a pinned tag for Linux ASR.
+- **whisper.cpp** (ggml contributors) - MIT, compiled from a pinned tag for the Linux Whisper fallback.
+- **NVIDIA Linux model weights** - downloaded on demand and governed by each original model card's terms; the GGUF conversions come from [`mudler/parakeet-cpp-gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf).

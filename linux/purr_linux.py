@@ -657,7 +657,7 @@ class GnomeShortcut:
                 self.binding = existing
         shortcut.set_string("command", f"gapplication action {APP_ID} dictate")
         Gio.Settings.sync()
-        self.on_status(f"Ready — tap Press {self.binding}", False)
+        self.on_status(f"Ready — tap {self.binding}", False)
 
     def configure(self) -> None:
         try:
@@ -855,6 +855,13 @@ class PurrApplication(Gtk.Application):
         )
         options.attach(live_label, 0, 0, 1, 1)
         live_switch = Gtk.Switch(active=bool(self.config.get("live_typing", True)))
+        # Gtk.Grid gives this column the width requested by the long microphone
+        # combo below it. A Switch defaults to filling that allocation, which
+        # makes some GTK themes draw a comically wide track and thumb. Keep it
+        # at its natural control size and align it with the other inputs.
+        live_switch.set_halign(Gtk.Align.END)
+        live_switch.set_valign(Gtk.Align.CENTER)
+        live_switch.set_hexpand(False)
         live_switch.connect("notify::active", self._live_typing_changed)
         options.attach(live_switch, 1, 0, 1, 1)
         language_label = Gtk.Label(label="Recognition language", xalign=0)

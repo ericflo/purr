@@ -1,5 +1,11 @@
 # Releasing Purr
 
+> [!IMPORTANT]
+> This inherited process documents the original project's signed macOS release
+> and requires Arun Brahma's Apple Developer identity. This fork does not
+> publish or auto-update Linux binaries yet; Linux users build from source as
+> described in [LINUX.md](LINUX.md).
+
 The documented, repeatable process for cutting a Purr release. Written down because Purr
 ships a Developer ID signed binary that runs with Accessibility and Input Monitoring
 permissions - the release channel is the most security-sensitive part of the project, and it

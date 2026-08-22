@@ -302,7 +302,7 @@ class ParakeetEngine:
     @property
     def backend_label(self) -> str:
         mode = "live" if self.streaming else "batch"
-        return f"NVIDIA Parakeet · {mode} · Radeon/Vulkan"
+        return f"NVIDIA Parakeet · {mode} · Vulkan"
 
     def start(self) -> None:
         library = self.build_dir / "libparakeet.so"

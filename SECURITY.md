@@ -1,48 +1,46 @@
 # Security Policy
 
-Purr runs with some of the most sensitive permissions macOS grants. Please report anything
-you find.
+Purr handles microphone audio and can inject text into other applications on
+both supported platforms. Please report anything security-sensitive you find.
 
 ## Reporting a vulnerability
 
 **Do not open a public issue for a security problem.**
 
-Report privately through either channel:
+For the Linux port in this fork, use:
 
-- [GitHub private vulnerability reporting](https://github.com/iamarunbrahma/purr/security/advisories/new) - preferred
-- Email **contact@arunbrahma.com** with `[purr-security]` in the subject
+- [Private vulnerability reporting for `ericflo/purr`](https://github.com/ericflo/purr/security/advisories/new)
+
+For the original macOS application or its signed release channel, report to
+the [upstream Purr advisory page](https://github.com/iamarunbrahma/purr/security/advisories/new)
+or email **contact@arunbrahma.com** with `[purr-security]` in the subject.
 
 Please include what you need to make the problem reproducible: the Purr version
-(menu bar > About Purr), your macOS version and chip, what you did, what happened, and what
-you expected. A proof of concept helps but is not required to report something.
+(or commit), operating system and desktop, CPU/GPU, selected model, what you did,
+what happened, and what you expected. A proof of concept helps but is not
+required.
 
 ### What to expect
 
-Purr is maintained by one person outside a full-time job. Treat these as targets:
-
-| Stage | Target |
-| --- | --- |
-| Acknowledgement that I received your report | 3 working days |
-| Initial assessment and severity call | 10 working days |
-| Fix released for a confirmed high-severity issue | 30 days where practical |
-
-If you have not heard back within a week, assume the mail went astray and ping me again.
-
-I will tell you plainly if I decide not to fix something, and why.
+The project is maintained by volunteers and does not promise a response-time
+service level. Maintainers will use the private advisory to acknowledge the
+report, coordinate a fix and disclosure timeline, and explain if a report will
+not be fixed. If you receive no acknowledgement, follow up through the same
+private channel.
 
 ## Disclosure
 
-Coordinated disclosure. I will work with you on a timeline and credit you in the release
-notes and advisory unless you would rather stay anonymous. If a fix is taking longer than
-90 days, you are free to disclose - I will not ask you to sit on a finding indefinitely.
+Please use coordinated disclosure. Maintainers will work with you on a timeline
+and credit you in the release notes and advisory unless you prefer anonymity.
+If a fix takes longer than 90 days, you are free to disclose.
 
 ## Safe harbour
 
-If you are acting in good faith to find and report a vulnerability, I will not pursue or
-support any action against you. Please stay within the obvious bounds: test against your
-own machine and your own data, do not access other people's audio or transcripts, do not
-degrade the service for anyone else, and give me a reasonable chance to fix things before
-going public.
+If you act in good faith to find and report a vulnerability, the project
+maintainers will not pursue or support action against you. Test only against
+your own machine and data, do not access other people's audio or transcripts,
+do not degrade services, and allow a reasonable opportunity to fix the issue
+before public disclosure.
 
 ## Supported versions
 
@@ -51,10 +49,12 @@ security fixes.
 
 | Version | Supported |
 | --- | --- |
-| Latest release | Yes |
-| Anything older | No - please update |
+| Linux `main` branch | Yes; source build only |
+| Latest upstream macOS release | Yes, by the upstream project |
+| Older revisions/releases | No; please update |
 
-Update from the menu bar: **About Purr > Check for Updates**.
+Linux users update with `git pull --ff-only && make linux-install`. macOS users
+update from **About Purr > Check for Updates**.
 
 ## Threat model
 
@@ -81,13 +81,30 @@ correct assumption is that a compromised Purr build would be an excellent survei
 tool, which is why the integrity of the release channel matters more than almost anything
 else in this project.
 
+### What Purr can do on Linux
+
+The Linux port has a smaller but still sensitive permission set:
+
+- **Microphone** - records the selected PipeWire/PulseAudio source while dictation is active
+- **Virtual keyboard** - opens `/dev/uinput` and creates “Purr virtual keyboard,” which can
+  type and erase text in the focused application
+- **GNOME settings** - installs and updates a custom global shortcut that invokes Purr's
+  application action
+- **Clipboard fallback** - can temporarily claim the Wayland clipboard when direct typing
+  cannot represent a final result, then attempts to restore the prior contents
+
+Purr's Linux shortcut does not monitor raw keyboard input: GNOME recognizes the configured
+shortcut and invokes a D-Bus application action. Temporary batch audio is deleted after
+transcription, but diagnostic logs include recognized text in plaintext. See
+[LINUX.md](LINUX.md#local-data-and-network-access) for exact paths.
+
 ### What Purr does not do
 
 - No telemetry, analytics, crash reporting, or usage tracking of any kind
-- No account, no login, no server
+- No account, no login, no remote transcription server
 - No network traffic at all once models are downloaded, other than an explicit update check
 
-The only outbound connections Purr ever makes:
+The macOS application makes these outbound connections:
 
 | Purpose | Host |
 | --- | --- |
@@ -99,7 +116,13 @@ The only outbound connections Purr ever makes:
 The updater refuses any download URL whose host is not exactly `github.com` over HTTPS,
 even if the GitHub API response names one.
 
-Your audio is never uploaded. Transcription runs on the Apple Neural Engine, on-device.
+The Linux build additionally clones pinned engine tags from GitHub, downloads models from
+Hugging Face, and obtains an Arch `wl-clipboard` package URL from `pacman`. Optional model
+downloads in the Linux GUI contact Hugging Face. The local Whisper HTTP process binds only
+to `127.0.0.1` on an ephemeral port.
+
+Audio is never uploaded. Transcription runs locally on the Apple Neural Engine on macOS and
+through local Vulkan/CPU inference on Linux.
 
 ### Where your data sits
 
@@ -122,7 +145,15 @@ roadmap.
 
 Preferences live in `defaults` under `com.arunbrahma.purr`.
 
+On Linux, models and engines live under the checkout's `.build-linux/` directory,
+preferences live at `~/.config/purr/config.json`, and plaintext diagnostic logs live under
+`~/.local/state/purr/`. Temporary batch audio uses `$XDG_RUNTIME_DIR/purr/` and is removed
+after transcription. The Linux port does not save transcript documents.
+
 ### Release integrity
+
+The following applies to upstream macOS releases. This fork currently publishes no Linux
+binaries: Linux users build the checked-out source locally with `make linux-install`.
 
 Releases are Developer ID signed, built with the Hardened Runtime, notarized by Apple, and
 stapled. The `.app`, the embedded `llama.framework`, and the `.dmg` are each signed, and the
@@ -145,7 +176,7 @@ download host, and verifies the codesign seal before swapping the bundle.
 
 ### Known limitations
 
-Weaknesses I already know about:
+Known weaknesses include:
 
 - **The checksum sidecar shares an origin with the artifact.** `Purr.dmg.sha256` is published
   in the same GitHub release as `Purr.dmg`. That defends against corruption and interception
@@ -167,17 +198,23 @@ Weaknesses I already know about:
 - **Model weights are third-party.** Purr verifies the Gemma GGUF against a pinned SHA-256
   and pins the llama.cpp XCFramework by checksum, but weights fetched by WhisperKit and
   FluidAudio are subject to those projects' own integrity handling.
+- **Linux downloads are not cryptographically verified.** Engine source is selected by
+  release tag rather than immutable commit, the Whisper download helper controls its model
+  URL, and Linux GGUF files are currently checked only by expected byte length. A mutable
+  tag or compromised download origin is therefore in the Linux build's trust boundary.
+- **The Linux port has no packaged release or update channel.** Users run build code and
+  newly pulled source directly from their checkout. Review changes before rebuilding.
 
-These are the things I would attack first. If you find something worse, please tell me.
+These are priority areas for security review. Please report anything worse privately.
 
 ## Scope
 
-**In scope:** the Purr application and this repository - the updater, model download and
-verification, permission handling, the vendored C in `Sources/CEcho`, transcript storage,
-and the signing and release pipeline.
+**In scope:** the Purr applications and this repository - the updater, Linux build/install
+path, model download and verification, permission handling, text injection, the vendored C
+in `Sources/CEcho`, transcript/log storage, and the signing and release pipeline.
 
-**Out of scope:** vulnerabilities in upstream dependencies (report those to WhisperKit,
-FluidAudio, llama.cpp, or SpeexDSP directly, though I would appreciate a heads-up), macOS
-itself, and the fact that Purr requires the permissions documented above - that is a design
-constraint, not a bug. Reports consisting only of automated scanner output with no
-demonstrated impact will be closed.
+**Out of scope:** vulnerabilities solely in upstream dependencies (report those to
+WhisperKit, FluidAudio, llama.cpp, SpeexDSP, parakeet.cpp, or whisper.cpp directly, with a
+heads-up here if Purr is affected), the operating system itself, and the fact that Purr
+requires the documented permissions. Reports consisting only of automated scanner output
+with no demonstrated impact may be closed.

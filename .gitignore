@@ -1,6 +1,11 @@
 .build/
 .build-linux/
 __pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
 .swiftpm/
 DerivedData/
 build/
@@ -12,6 +17,17 @@ Package.resolved
 
 # App Store Connect API private key (notary credentials) — never commit.
 AuthKey_*.p8
+*.p12
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Linux models, diagnostics, and captured audio must stay local.
+*.gguf
+*.log
+*.wav
 
 # Local-only Playwright artifacts produced when iterating on the website.
 .playwright-mcp/
