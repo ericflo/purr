@@ -140,7 +140,7 @@ background Wayland clipboard restrictions. Say “scratch that” to remove the
 preceding dictated word immediately. The second tap finalizes the stream. The
 GUI can download, select, and remove these additional local models:
 
-- NVIDIA Parakeet Realtime EOU 120M (English live streaming)
+- NVIDIA Parakeet Realtime EOU 120M (English live streaming, lowercase without punctuation)
 - NVIDIA Parakeet TDT 0.6B V2 (English batch accuracy)
 - NVIDIA Parakeet TDT 0.6B V3 (25-language batch accuracy)
 - NVIDIA Parakeet TDT-CTC 110M (small and fast)

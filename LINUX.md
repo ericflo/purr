@@ -124,8 +124,8 @@ If Purr cannot start yet (the model is still loading, the previous dictation is
 still finishing, or the engine failed), the tap shows a notification explaining
 why instead of doing nothing. If the microphone stops or disappears during
 dictation, Purr keeps the words already typed and says that dictation ended.
-The top-bar menu's **Start Dictation** item switches to **Stop Dictation** while
-Purr is listening.
+The top-bar menu leads with **Start Dictation**, which switches to **Stop
+Dictation** while Purr is listening.
 
 If the microphone delivers only silence for the first three seconds (muted,
 switched off, or the wrong device), Purr warns right away with a notification
@@ -135,7 +135,8 @@ sound, and dictation keeps running either way.
 The Purr window has a practice box: **Start Dictation** in the window types
 into it, so you can try dictation, voice commands, and microphones without
 touching another app. While listening, a level meter beside the status shows
-what the microphone hears.
+what the microphone hears. On screens too short for the whole window, such as
+1366×768 laptops, the window scrolls instead of cutting off its settings.
 
 Click **Shortcut…** in Purr to open GNOME's keyboard settings. Purr preserves a
 shortcut changed there and shows the new one immediately. All text is typed
@@ -165,11 +166,14 @@ removable from the window.
 | Model | Approx. size | Mode | Languages |
 | --- | ---: | --- | --- |
 | NVIDIA Nemotron 3.5 Streaming Q5 | 748 MiB | Live, default | 40+ prompted locales |
-| NVIDIA Parakeet Realtime EOU 120M Q5 | 135 MiB | Live | English |
+| NVIDIA Parakeet Realtime EOU 120M Q5 | 135 MiB | Live, lowercase without punctuation | English |
 | NVIDIA Parakeet TDT 0.6B V2 Q5 | 672 MiB | Batch | English |
 | NVIDIA Parakeet TDT 0.6B V3 Q5 | 708 MiB | Batch | 25 European languages |
 | NVIDIA Parakeet TDT-CTC 110M Q5 | 137 MiB | Batch | English |
 | Whisper Large V3 Turbo Q5 | 548 MiB | Batch fallback | Multilingual |
+
+Realtime EOU writes lowercase text without punctuation; Purr capitalizes the
+pronoun “I” for it when the recognition language is English.
 
 Nemotron and Parakeet run through
 [`parakeet.cpp`](https://github.com/mudler/parakeet.cpp). The Q5 GGUF conversions

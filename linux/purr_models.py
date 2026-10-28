@@ -34,6 +34,8 @@ class ModelSpec:
     engine: str = "parakeet"
     # Renew the live stream at pauses; see ParakeetStream.
     renew_at_pauses: bool = False
+    # Whether the model writes punctuation and capitals itself.
+    punctuates: bool = True
 
     @property
     def url(self) -> str:
@@ -64,9 +66,10 @@ MODELS = (
         "realtime_eou_120m-v1-q5_k.gguf",
         141_151_648,
         "Very small, very low-latency English streaming model with real "
-        "end-of-utterance detection.",
+        "end-of-utterance detection. Writes lowercase without punctuation.",
         "English",
         True,
+        punctuates=False,
     ),
     ModelSpec(
         "parakeet-v2-q5",

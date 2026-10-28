@@ -169,6 +169,26 @@ class PostProcessorTests(unittest.TestCase):
         self.assertEqual(text, "café — 日本語 🐈\ndone")
         self.assertTrue(UInputKeyboard.__new__(UInputKeyboard).can_type(text))
 
+    def test_lowercase_models_get_a_capital_pronoun_i(self):
+        processor = PostProcessor({"language": "en", "voice_commands": False, "trim_fillers": False})
+        raw = "okay i think i'm sure, i.e. what i'd say if i'll lose i"
+        self.assertEqual(processor.apply(raw)[0], raw)  # models that punctuate are left alone
+        processor.capitalize_pronoun = True
+        self.assertEqual(
+            processor.apply(raw)[0], "okay I think I'm sure, i.e. what I'd say if I'll lose I"
+        )
+        processor.config["language"] = "it"  # Italian "i" is an article
+        self.assertEqual(processor.apply("i gatti")[0], "i gatti")
+
+    def test_only_lowercase_models_ask_for_the_pronoun_fix(self):
+        self.assertFalse(MODEL_BY_ID["eou-streaming-q5"].punctuates)
+        self.assertTrue(MODEL_BY_ID["nemotron-streaming-q5"].punctuates)
+        app = live_app(ScreenKeyboard())
+        self.assertFalse(app.processor.capitalize_pronoun)
+        app.model = MODEL_BY_ID["eou-streaming-q5"]
+        app._server_ready()
+        self.assertTrue(app.processor.capitalize_pronoun)
+
     def test_transcript_preview_keeps_only_the_tail(self):
         self.assertEqual(transcript_preview("short"), "short")
         preview = transcript_preview("word " * 2000)
@@ -408,6 +428,34 @@ class LinuxIntegrationTests(unittest.TestCase):
         self.assertEqual(app.model_action.get_label(), "Use model")
         # The built-in fallback cannot be removed, so no Remove button at all.
         self.assertFalse(app.model_remove.get_visible())
+
+    def test_window_scrolls_only_on_screens_too_short_for_it(self):
+        def page_policy(screen_height):
+            monitor = mock.Mock()
+            monitor.get_workarea.return_value = mock.Mock(height=screen_height)
+            display = mock.Mock(get_primary_monitor=lambda: monitor)
+            with mock.patch.object(purr_linux.Gdk.Display, "get_default", return_value=display):
+                app = windowed_app()
+            return app.window.get_child().get_policy()[1]
+
+        self.assertEqual(page_policy(1080), Gtk.PolicyType.NEVER)
+        self.assertEqual(page_policy(600), Gtk.PolicyType.AUTOMATIC)
+
+    def test_window_gives_back_the_height_of_a_hidden_description(self):
+        app = windowed_app()
+        app.window.get_child().set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
+        app.window.resize = mock.Mock()
+        app.model_combo.set_active_id("whisper-turbo-q5")
+        self.assertTrue(app.model_description.get_visible())
+        app.window.resize.assert_not_called()
+        app.model_combo.set_active_id(app.model.id)
+        self.assertFalse(app.model_description.get_visible())
+        app.window.resize.assert_called_once()
+        # A scrolling page keeps the size the screen allows.
+        app.window.get_child().set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        app.model_combo.set_active_id("whisper-turbo-q5")
+        app.model_combo.set_active_id(app.model.id)
+        app.window.resize.assert_called_once()
 
     def test_status_shows_a_matching_state_indicator(self):
         app = windowed_app()

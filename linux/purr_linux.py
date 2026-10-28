@@ -168,8 +168,13 @@ class PostProcessor:
         (r"\bequals sign\b\.?", "="),
     ]
 
+    # The English pronoun, alone or contracted, but not "i.e." or "i-th".
+    PRONOUN_I = re.compile(r"\bi(?=(?:'(?:m|ll|ve|d))?(?:[\s,;:!?]|$))")
+
     def __init__(self, config: dict):
         self.config = config
+        # Set for models that write lowercase without punctuation.
+        self.capitalize_pronoun = False
 
     @staticmethod
     def _scratch(text: str) -> tuple[str, int]:
@@ -211,6 +216,8 @@ class PostProcessor:
                         text,
                         flags=re.IGNORECASE,
                     )
+        if self.capitalize_pronoun and str(self.config.get("language", "en")) == "en":
+            text = self.PRONOUN_I.sub("I", text)
         # The virtual keyboard is the only insertion path, and control
         # characters have no key or Unicode-compose form.
         if not text.replace("\n", " ").replace("\t", " ").isprintable():
@@ -480,6 +487,7 @@ class PurrApplication(Gtk.Application):
         self.processor = PostProcessor(self.config)
         self.store = ModelStore(BUILD)
         self.server, self.model = create_engine(self.config, BUILD, STATE, self.store)
+        self.processor.capitalize_pronoun = not self.model.punctuates
         self.keyboard: UInputKeyboard | None = None
         self.shortcuts: GnomeShortcut | None = None
         self.recorder: subprocess.Popen | None = None
@@ -546,7 +554,7 @@ class PurrApplication(Gtk.Application):
     def _install_css() -> None:
         provider = Gtk.CssProvider()
         provider.load_from_data(b"""
-            .purr-card { background: alpha(@theme_fg_color, 0.055); border-radius: 12px; padding: 16px; }
+            .purr-card { background: alpha(@theme_fg_color, 0.055); border-radius: 12px; padding: 14px 16px; }
             .purr-live { background: rgba(24, 24, 28, 0.94); color: white; border-radius: 18px; padding: 18px 24px; }
             .purr-live label { color: white; font-size: 17px; }
             .purr-record { padding: 10px 22px; font-weight: bold; }
@@ -574,15 +582,15 @@ class PurrApplication(Gtk.Application):
         self.indicator_model.set_sensitive(False)
         menu.append(self.indicator_model)
         menu.append(Gtk.SeparatorMenuItem())
+        self.indicator_dictate = Gtk.MenuItem(label="Start Dictation")
+        self.indicator_dictate.connect("activate", lambda _item: self._toggle_recording(None))
+        menu.append(self.indicator_dictate)
         show = Gtk.MenuItem(label="Open Purr")
         show.connect("activate", lambda _item: self._show_window())
         menu.append(show)
         configure = Gtk.MenuItem(label="Change Dictation Shortcut…")
         configure.connect("activate", lambda _item: self.shortcuts and self.shortcuts.configure())
         menu.append(configure)
-        self.indicator_dictate = Gtk.MenuItem(label="Start Dictation")
-        self.indicator_dictate.connect("activate", lambda _item: self._toggle_recording(None))
-        menu.append(self.indicator_dictate)
         menu.append(Gtk.SeparatorMenuItem())
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", lambda _item: self.quit())
@@ -593,14 +601,14 @@ class PurrApplication(Gtk.Application):
     def _build_window(self) -> None:
         self.window = Gtk.ApplicationWindow(application=self)
         self.window.set_title("Purr")
-        self.window.set_default_size(650, 650)
+        self.window.set_default_size(680, -1)  # natural height; scrolls on short screens
         self.window.connect("delete-event", self._hide_window)
         header = Gtk.HeaderBar(title="Purr", subtitle="Private, local dictation")
         header.set_show_close_button(True)
         self.window.set_titlebar(header)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        outer.set_border_width(22)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        outer.set_border_width(18)
 
         status_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         status_card.get_style_context().add_class("purr-card")
@@ -638,7 +646,7 @@ class PurrApplication(Gtk.Application):
             wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=10, right_margin=10,
             top_margin=8, bottom_margin=8,
         )
-        practice_scroll = Gtk.ScrolledWindow(min_content_height=110)
+        practice_scroll = Gtk.ScrolledWindow(min_content_height=96)
         practice_scroll.set_shadow_type(Gtk.ShadowType.IN)
         practice_scroll.add(self.practice)
         practice_area = Gtk.Overlay()
@@ -756,13 +764,41 @@ class PurrApplication(Gtk.Application):
         )
         note.get_style_context().add_class("dim-label")
         outer.pack_end(note, False, False, 0)
-        self.window.add(outer)
+        # Laptop screens can be shorter than the window: scroll there rather
+        # than cut off the settings. Where it fits, never scroll, so the window
+        # simply sizes to its content.
+        page = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+        )
+        page.add(outer)
+        self.window.add(page)
+        outer.show_all()  # measured with the model description shown, the tallest layout
+        if self._fits_on_screen(outer):
+            page.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
         self.window.show_all()
         self.download_progress.hide()
         self.practice.grab_focus()
         self._show_status_state()
         self._sync_record_controls()
         self._refresh_model_ui()
+
+    @staticmethod
+    def _fits_on_screen(content) -> bool:
+        display = Gdk.Display.get_default()
+        monitor = display and (display.get_primary_monitor() or display.get_monitor(0))
+        if not monitor:
+            return True
+        _minimum, natural = content.get_preferred_height()
+        # Room for the header bar and window shadows.
+        return natural + 120 <= monitor.get_workarea().height
+
+    def _shrink_to_content(self) -> None:
+        """Give back the height of a section that was hidden. GTK grows a window
+        for new content but never shrinks it; where the page does not scroll,
+        the smallest size is exactly the content."""
+        page = self.window.get_child()
+        if page.get_policy()[1] == Gtk.PolicyType.NEVER:
+            self.window.resize(self.window.get_size()[0], 1)
 
     def _populate_microphones(self) -> None:
         """(Re)list sources, so devices plugged in since the last look appear."""
@@ -995,6 +1031,7 @@ class PurrApplication(Gtk.Application):
             GLib.idle_add(self._server_failed, str(error))
 
     def _server_ready(self) -> bool:
+        self.processor.capitalize_pronoun = not self.model.punctuates
         self.ready = True
         self.busy = False
         self.engine_error = None
@@ -1356,6 +1393,12 @@ class PurrApplication(Gtk.Application):
             f"{selected.summary}\n{selected.languages}  ·  {selected.size_label}"
         )
         active = selected.id == self.model.id
+        # The description helps while choosing another model; for the one in
+        # use it only makes the window taller.
+        described = self.model_description.get_visible()
+        self.model_description.set_visible(not active)
+        if described and active:
+            self._shrink_to_content()
         self.model_state.set_visible(active)
         self.model_buttons.set_visible(not active)
         if active:
