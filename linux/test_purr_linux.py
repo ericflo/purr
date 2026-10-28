@@ -1,15 +1,21 @@
 import array
+import base64
+import functools
+import hashlib
+import http.server
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import socket
+import struct
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
 import warnings
-import wave
 
 # purr_linux resolves its log and config paths at import time. Point them at a
 # sandbox so tests never write the user's real purr.log or config.json.
@@ -25,12 +31,22 @@ from purr_linux import (
     PostProcessor,
     PurrApplication,
     UInputKeyboard,
-    multipart_body,
-    normalize_wav,
     shortcut_label,
     transcript_preview,
 )
-from purr_models import DEFAULT_MODEL_ID, MODEL_BY_ID, ModelSpec, ModelStore, ParakeetStream
+from purr_models import (
+    DEFAULT_MODEL_ID,
+    MODEL_BY_ID,
+    MODELS,
+    LlamaRealtimeEngine,
+    ModelFile,
+    ModelSpec,
+    ModelStore,
+    ParakeetEngine,
+    ParakeetStream,
+    RealtimeStream,
+    create_engine,
+)
 
 
 def tearDownModule():
@@ -76,7 +92,7 @@ class UnmappedWindow(Gtk.Window):
 
 def windowed_app(keyboard=None):
     app = live_app(keyboard or ScreenKeyboard())
-    app.server.backend_label = "live · Vulkan"
+    app.server.backend_label = "Vulkan · parakeet.cpp"
     with mock.patch.object(purr_linux.Gtk, "ApplicationWindow", lambda application: UnmappedWindow()), \
             mock.patch.object(purr_linux, "list_microphones", return_value=[]), \
             mock.patch.object(purr_linux.subprocess, "run", side_effect=OSError):
@@ -235,30 +251,6 @@ class StreamRenewalTests(unittest.TestCase):
     def test_only_models_that_ask_for_it_renew(self):
         self.assertTrue(MODEL_BY_ID["nemotron-streaming-q5"].renew_at_pauses)
         self.assertFalse(MODEL_BY_ID["eou-streaming-q5"].renew_at_pauses)
-
-
-class AudioTests(unittest.TestCase):
-    def test_normalization_boosts_quiet_pcm(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "quiet.wav"
-            samples = array.array("h", [100, -100] * 1600)
-            with wave.open(str(path), "wb") as output:
-                output.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-                output.writeframes(samples.tobytes())
-            peak_db, _ = normalize_wav(path)
-            self.assertLess(peak_db, -40)
-            with wave.open(str(path), "rb") as result:
-                normalized = array.array("h", result.readframes(result.getnframes()))
-            self.assertGreater(max(normalized), 20_000)
-
-    def test_multipart_contains_audio_and_fields(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "a.wav"
-            path.write_bytes(b"RIFFaudio")
-            body, content_type = multipart_body(path, {"language": "en"})
-            self.assertIn(b'form-data; name="language"', body)
-            self.assertIn(b"RIFFaudio", body)
-            self.assertIn("boundary=", content_type)
 
 
 class LinuxIntegrationTests(unittest.TestCase):
@@ -420,14 +412,31 @@ class LinuxIntegrationTests(unittest.TestCase):
         app = windowed_app()
         self.assertTrue(app.model_state.get_visible())
         self.assertIn("In use", app.model_state.get_text())
-        self.assertIn("live · Vulkan", app.model_state.get_text())
+        self.assertIn("Vulkan · parakeet.cpp", app.model_state.get_text())
         self.assertFalse(app.model_buttons.get_visible())
-        app.model_combo.set_active_id("whisper-turbo-q5")
+        with mock.patch.object(app.store, "installed", return_value=True):
+            app.model_combo.set_active_id("eou-streaming-q5")
         self.assertFalse(app.model_state.get_visible())
         self.assertTrue(app.model_buttons.get_visible())
         self.assertEqual(app.model_action.get_label(), "Use model")
-        # The built-in fallback cannot be removed, so no Remove button at all.
+        self.assertTrue(app.model_remove.get_visible())
+        with mock.patch.object(app.store, "installed", return_value=False):
+            app.model_combo.set_active_id("voxtral-realtime-q4")
+        self.assertEqual(app.model_action.get_label(), "Download & use (3.4 GB)")
+        # Nothing to remove before it is downloaded.
         self.assertFalse(app.model_remove.get_visible())
+
+    def test_language_setting_is_greyed_out_for_models_that_ignore_it(self):
+        app = windowed_app()
+        self.assertTrue(app.language_combo.get_sensitive())
+        for model_id, reason in (
+            ("eou-streaming-q5", "is English only"),
+            ("voxtral-realtime-q4", "detects the language itself"),
+        ):
+            app.model = MODEL_BY_ID[model_id]
+            app._refresh_model_ui()
+            self.assertFalse(app.language_combo.get_sensitive())
+            self.assertIn(reason, app.language_combo.get_tooltip_text())
 
     def test_window_scrolls_only_on_screens_too_short_for_it(self):
         def page_policy(screen_height):
@@ -445,7 +454,7 @@ class LinuxIntegrationTests(unittest.TestCase):
         app = windowed_app()
         app.window.get_child().set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
         app.window.resize = mock.Mock()
-        app.model_combo.set_active_id("whisper-turbo-q5")
+        app.model_combo.set_active_id("eou-streaming-q5")
         self.assertTrue(app.model_description.get_visible())
         app.window.resize.assert_not_called()
         app.model_combo.set_active_id(app.model.id)
@@ -453,7 +462,7 @@ class LinuxIntegrationTests(unittest.TestCase):
         app.window.resize.assert_called_once()
         # A scrolling page keeps the size the screen allows.
         app.window.get_child().set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        app.model_combo.set_active_id("whisper-turbo-q5")
+        app.model_combo.set_active_id("eou-streaming-q5")
         app.model_combo.set_active_id(app.model.id)
         app.window.resize.assert_called_once()
 
@@ -616,13 +625,16 @@ class LinuxIntegrationTests(unittest.TestCase):
         self.assertIsNone(app.recorder)
         self.assertEqual(len(app.notifications), 1)
 
-    def test_retired_live_typing_toggle_is_dropped_from_config(self):
+    def test_retired_settings_are_dropped_from_config(self):
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "config.json"
-            config_file.write_text(json.dumps({"live_typing": False, "language": "de"}))
+            config_file.write_text(json.dumps(
+                {"live_typing": False, "initial_prompt": "Whisper only", "language": "de"}
+            ))
             with mock.patch.object(purr_linux, "CONFIG_FILE", config_file):
                 config = purr_linux.load_config()
         self.assertNotIn("live_typing", config)
+        self.assertNotIn("initial_prompt", config)
         self.assertEqual(config["language"], "de")
 
     def test_live_keyboard_supports_unicode_and_rejects_controls(self):
@@ -631,15 +643,264 @@ class LinuxIntegrationTests(unittest.TestCase):
         self.assertTrue(keyboard.can_type("café — 日本語 🐈"))
         self.assertFalse(keyboard.can_type("bad\0control"))
 
-    def test_model_is_installed_only_at_exact_size(self):
+    def test_model_is_installed_only_with_every_file_at_exact_size(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ModelStore(Path(directory))
-            model = ModelSpec("test", "Test", "test.gguf", 3, "", "")
+            model = ModelSpec(
+                "test", "Test", (ModelFile("a.gguf", 3, "", ""), ModelFile("b.gguf", 2, "", "")), "", ""
+            )
             store.models_dir.mkdir(parents=True)
-            store.path(model).write_bytes(b"no")
+            store.path(model, 0).write_bytes(b"yes")
             self.assertFalse(store.installed(model))
-            store.path(model).write_bytes(b"yes")
+            store.path(model, 1).write_bytes(b"n")
+            self.assertFalse(store.installed(model))
+            store.path(model, 1).write_bytes(b"ok")
             self.assertTrue(store.installed(model))
+            store.remove(model)
+            self.assertEqual(list(store.models_dir.iterdir()), [])
+
+
+class ModelCatalogTests(unittest.TestCase):
+    def test_every_model_types_live_from_a_pinned_download(self):
+        self.assertEqual(DEFAULT_MODEL_ID, "nemotron-streaming-q5")
+        for model in MODELS:
+            self.assertIn(model.engine, ("parakeet", "llama"))
+            for file in model.files:
+                # A revision hash, never a moving branch such as "main".
+                self.assertRegex(file.url, r"/resolve/[0-9a-f]{40}/")
+                self.assertGreater(file.size, 0)
+                self.assertRegex(file.sha256, r"^[0-9a-f]{64}$")
+        self.assertEqual(len(MODEL_BY_ID["voxtral-realtime-q4"].files), 2)
+
+    def test_download_fetches_every_file_and_reports_progress_across_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            served = Path(directory) / "served"
+            served.mkdir()
+            (served / "model.gguf").write_bytes(b"m" * 3000)
+            (served / "projector.gguf").write_bytes(b"p" * 1000)
+            digest = lambda name: hashlib.sha256((served / name).read_bytes()).hexdigest()
+            handler = functools.partial(QuietHandler, directory=str(served))
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            source = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                model = ModelSpec(
+                    "two", "Two",
+                    (
+                        ModelFile("model.gguf", 3000, digest("model.gguf"), source),
+                        ModelFile("projector.gguf", 1000, digest("projector.gguf"), source),
+                    ),
+                    "", "",
+                )
+                store = ModelStore(Path(directory) / "build")
+                store.models_dir.mkdir(parents=True)
+                # A stale partial file from an interrupted download is replaced.
+                (store.models_dir / "model.gguf.part").write_bytes(b"stale")
+                reports = []
+                store.download(model, lambda done, total: reports.append((done, total)))
+                self.assertTrue(store.installed(model))
+                self.assertEqual(reports[-1], (4000, 4000))
+                self.assertEqual([done for done, _ in reports], sorted(done for done, _ in reports))
+                # Right size, wrong bytes: refused, and nothing half-trusted is left behind.
+                (served / "tampered.gguf").write_bytes(b"x" * 1000)
+                tampered = ModelSpec(
+                    "bad", "Bad", (ModelFile("tampered.gguf", 1000, digest("projector.gguf"), source),), "", ""
+                )
+                with self.assertRaisesRegex(RuntimeError, "checksum"):
+                    store.download(tampered)
+                self.assertFalse(store.installed(tampered))
+                self.assertFalse((store.models_dir / "tampered.gguf.part").exists())
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_a_missing_model_falls_back_to_the_default(self):
+        store = mock.Mock(installed=lambda model: model.id == DEFAULT_MODEL_ID)
+        store.path = lambda model, index=0: Path(model.files[index].name)
+        engine, model = create_engine({"model": "voxtral-realtime-q4"}, Path("/b"), Path("/s"), store)
+        self.assertEqual(model.id, DEFAULT_MODEL_ID)
+        self.assertIsInstance(engine, ParakeetEngine)
+        store.installed = lambda model: True
+        engine, model = create_engine({"model": "voxtral-realtime-q4"}, Path("/b"), Path("/s"), store)
+        self.assertIsInstance(engine, LlamaRealtimeEngine)
+        self.assertEqual(engine.projector.name, "mmproj-Voxtral-Mini-4B-Realtime-2602-Q8_0.gguf")
+        store.installed = lambda model: False
+        with self.assertRaises(RuntimeError):
+            create_engine({"model": "voxtral-realtime-q4"}, Path("/b"), Path("/s"), store)
+
+
+class StaleServerTests(unittest.TestCase):
+    def test_an_orphaned_server_is_stopped_but_nothing_else_is(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build, state = Path(directory) / "build", Path(directory) / "state"
+            binary = build / "llama.cpp" / "build" / "bin" / "llama-server"
+            binary.parent.mkdir(parents=True)
+            shutil.copy(shutil.which("sleep"), binary)  # an executable that keeps its own argv[0]
+            state.mkdir()
+            engine = LlamaRealtimeEngine(build, Path(), Path(), state)
+            # A PID now belonging to some other program is left alone.
+            bystander = purr_linux.subprocess.Popen(["sleep", "30"])
+            engine.pid_file.write_text(str(bystander.pid))
+            engine.reap_stale()
+            self.assertIsNone(bystander.poll())
+            self.assertFalse(engine.pid_file.exists())
+            bystander.kill()
+            bystander.wait()
+            # Our own orphaned llama-server is stopped.
+            orphan = purr_linux.subprocess.Popen([str(binary), "30"])
+            time.sleep(0.2)
+            engine.pid_file.write_text(str(orphan.pid))
+            with self.assertLogs("purr", "WARNING"):
+                create_engine(
+                    {}, build, state, mock.Mock(installed=lambda model: True, path=lambda m, i=0: Path("x"))
+                )
+            self.assertIsNotNone(orphan.wait(timeout=5))
+            self.assertFalse(engine.pid_file.exists())
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+
+class FakeRealtimeServer(threading.Thread):
+    """A local /v1/realtime endpoint: each audio chunk gets the next scripted delta,
+    and a final commit gets the session's closing text and a completed event."""
+
+    def __init__(self, sessions, rate=16000):
+        super().__init__(daemon=True)
+        self.sessions = list(sessions)  # per session: (deltas, closing text)
+        self.rate = rate
+        self.opened = 0
+        self.audio_bytes = 0
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen()
+        self.port = self.listener.getsockname()[1]
+        self.start()
+
+    def run(self):
+        while self.sessions:
+            connection, _ = self.listener.accept()
+            deltas, closing = self.sessions.pop(0)
+            self.opened += 1
+            with connection:
+                self.serve(connection, iter(deltas), closing)
+
+    @staticmethod
+    def read_exact(connection, count):
+        data = b""
+        while len(data) < count:
+            chunk = connection.recv(count - len(data))
+            if not chunk:
+                raise ConnectionError
+            data += chunk
+        return data
+
+    def receive(self, connection):
+        first, second = self.read_exact(connection, 2)
+        size = second & 0x7F
+        if size == 126:
+            size = struct.unpack("!H", self.read_exact(connection, 2))[0]
+        elif size == 127:
+            size = struct.unpack("!Q", self.read_exact(connection, 8))[0]
+        assert second & 0x80, "client frames must be masked"
+        mask = self.read_exact(connection, 4)
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(self.read_exact(connection, size)))
+        return None if first & 0x0F == 0x8 else json.loads(payload)
+
+    @staticmethod
+    def send(connection, message):
+        payload = json.dumps(message).encode()
+        size = len(payload)
+        header = bytes([0x81, size]) if size < 126 else bytes([0x81, 126]) + struct.pack("!H", size)
+        connection.sendall(header + payload)
+
+    def serve(self, connection, deltas, closing):
+        request = b""
+        while b"\r\n\r\n" not in request:
+            request += connection.recv(4096)
+        assert b"GET /v1/realtime?intent=transcription " in request
+        key = re.search(rb"Sec-WebSocket-Key: (\S+)", request)[1]
+        accept = base64.b64encode(hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+        connection.sendall(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+        )
+        self.send(connection, {
+            "type": "session.created", "session": {"audio": {"input": {"format": {"rate": self.rate}}}},
+        })
+        while True:
+            try:
+                event = self.receive(connection)
+            except ConnectionError:
+                return
+            if event is None:
+                return
+            if event["type"] == "input_audio_buffer.append":
+                self.audio_bytes += len(base64.b64decode(event["audio"]))
+                delta = next(deltas, "")
+                if delta == "ERROR":
+                    self.send(connection, {"type": "error", "error": {"message": "model failed"}})
+                elif delta:
+                    self.send(connection, {
+                        "type": "conversation.item.input_audio_transcription.delta", "delta": delta,
+                    })
+            elif event["type"] == "input_audio_buffer.commit":
+                if closing:
+                    self.send(connection, {
+                        "type": "conversation.item.input_audio_transcription.delta", "delta": closing,
+                    })
+                self.send(connection, {"type": "conversation.item.input_audio_transcription.completed"})
+
+
+class RealtimeStreamTests(unittest.TestCase):
+    def feed(self, stream, chunks):
+        text = ""
+        for chunk in chunks:
+            text += stream.feed_s16(chunk)["text"]
+            time.sleep(0.002)  # let the local server answer, as a real one does between chunks
+        return text
+
+    def test_audio_streams_up_and_words_come_back(self):
+        server = FakeRealtimeServer([([" Hello", " there,", " friend"], ".")])
+        stream = RealtimeStream(server.port)
+        text = self.feed(stream, [SPEECH] * 3) + stream.finalize()["text"]
+        stream.close()
+        self.assertEqual(text, " Hello there, friend.")
+        # Every 200 ms chunk arrived intact through masked 16-bit-length frames.
+        self.assertEqual(server.audio_bytes, 3 * len(SPEECH))
+
+    def test_long_dictation_moves_to_a_fresh_session_at_a_pause(self):
+        server = FakeRealtimeServer([([" my"] + [" account"] * 44 + [" has"], ""), (["Access", " to"], ""), ([], "")])
+        stream = RealtimeStream(server.port)
+        stream.RENEW_AFTER = 8.0
+        text = self.feed(stream, [SPEECH] * 46 + [SILENCE] * 8 + [SPEECH] * 3)
+        text += stream.finalize()["text"]
+        stream.close()
+        self.assertEqual(stream.renewals, 1)
+        self.assertEqual(server.opened, 2)
+        self.assertTrue(text.endswith("account has access to"), text[-40:])
+
+    def test_a_session_renews_even_without_a_pause_before_its_context_fills(self):
+        server = FakeRealtimeServer([([" word"] * 30, ""), ([" more"], ""), ([], "")])
+        stream = RealtimeStream(server.port)
+        stream.RENEW_LIMIT = 5.0
+        self.feed(stream, [SPEECH] * 30)
+        stream.close()
+        self.assertEqual(stream.renewals, 1)
+
+    def test_errors_from_the_model_are_raised(self):
+        server = FakeRealtimeServer([([" fine", "ERROR"], "")])
+        stream = RealtimeStream(server.port)
+        with self.assertRaisesRegex(RuntimeError, "model failed"):
+            self.feed(stream, [SPEECH] * 4)
+        stream.close()
+
+    def test_a_model_wanting_another_sample_rate_is_refused(self):
+        server = FakeRealtimeServer([([], "")], rate=24000)
+        with self.assertRaisesRegex(RuntimeError, "24000 Hz"):
+            RealtimeStream(server.port)
 
 
 if __name__ == "__main__":

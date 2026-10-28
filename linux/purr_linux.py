@@ -16,11 +16,8 @@ import signal
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import uuid
-import wave
 
 import gi
 
@@ -41,13 +38,10 @@ from purr_models import (
 APP_ID = "com.arunbrahma.purr"
 ROOT = Path(os.environ.get("PURR_ROOT", Path(__file__).resolve().parent.parent))
 BUILD = ROOT / ".build-linux"
-WHISPER_BIN = BUILD / "whisper.cpp" / "build" / "bin"
-WHISPER_SERVER = WHISPER_BIN / "whisper-server"
-MODEL = BUILD / "models" / "ggml-large-v3-turbo-q5_0.bin"
 PARAKEET_LIB = BUILD / "parakeet.cpp" / "build" / "libparakeet.so"
 NEMOTRON_MODEL = BUILD / "models" / "nemotron-3.5-asr-streaming-0.6b-q5_k.gguf"
+LLAMA_SERVER = BUILD / "llama.cpp" / "build" / "bin" / "llama-server"
 ICON = ROOT / "Resources" / "purr_app_logo.png"
-RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / "purr"
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "purr"
 CONFIG_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "purr/config.json"
 # Peak level below which a recording counts as silence (a muted or dead microphone).
@@ -79,7 +73,6 @@ DEFAULT_CONFIG = {
     "trim_fillers": True,
     "voice_commands": True,
     "dictionary": {},
-    "initial_prompt": "",
     "log_transcripts": False,
 }
 
@@ -94,8 +87,10 @@ def load_config() -> dict:
         pass
     except Exception:
         LOG.exception("Ignoring invalid config at %s", CONFIG_FILE)
-    # Dictation always types live now; drop the retired clipboard-mode toggle.
+    # Dictation always types live now; drop the retired clipboard-mode toggle
+    # and the prompt of the retired Whisper engine.
     config.pop("live_typing", None)
+    config.pop("initial_prompt", None)
     return config
 
 
@@ -237,56 +232,6 @@ def shortcut_label(binding: str) -> str:
     """Turn a GSettings accelerator such as <Control><Alt>space into Ctrl+Alt+Space."""
     key, modifiers = Gtk.accelerator_parse(binding)
     return Gtk.accelerator_get_label(key, modifiers) if key else binding
-
-
-def normalize_wav(path: Path) -> tuple[float, float]:
-    """Remove DC and boost quiet speech toward -3 dBFS in place."""
-    with wave.open(str(path), "rb") as source:
-        params = source.getparams()
-        if params.sampwidth != 2 or params.nchannels != 1:
-            raise RuntimeError("PipeWire returned an unexpected audio format")
-        pcm = array.array("h", source.readframes(params.nframes))
-    if not pcm:
-        return -120.0, -120.0
-    mean = sum(pcm) / len(pcm)
-    centered = [max(-32768, min(32767, round(sample - mean))) for sample in pcm]
-    peak = max(abs(sample) for sample in centered)
-    rms = math.sqrt(sum(sample * sample for sample in centered) / len(centered))
-    peak_db = 20 * math.log10(peak / 32768) if peak else -120.0
-    rms_db = 20 * math.log10(rms / 32768) if rms else -120.0
-    if -60.0 < peak_db < -3.0:
-        gain = (32768 * (10 ** (-3.0 / 20))) / peak
-        centered = [max(-32768, min(32767, round(sample * gain))) for sample in centered]
-    output = array.array("h", centered)
-    with wave.open(str(path), "wb") as target:
-        target.setparams(params)
-        target.writeframes(output.tobytes())
-    return peak_db, rms_db
-
-
-def multipart_body(path: Path, fields: dict[str, str]) -> tuple[bytes, str]:
-    boundary = "----purr-" + uuid.uuid4().hex
-    chunks: list[bytes] = []
-    for name, value in fields.items():
-        chunks.extend(
-            [
-                f"--{boundary}\r\n".encode(),
-                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
-                str(value).encode(),
-                b"\r\n",
-            ]
-        )
-    chunks.extend(
-        [
-            f"--{boundary}\r\n".encode(),
-            f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'.encode(),
-            b"Content-Type: audio/wav\r\n\r\n",
-            path.read_bytes(),
-            b"\r\n",
-            f"--{boundary}--\r\n".encode(),
-        ]
-    )
-    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
 class UInputKeyboard:
@@ -491,7 +436,6 @@ class PurrApplication(Gtk.Application):
         self.keyboard: UInputKeyboard | None = None
         self.shortcuts: GnomeShortcut | None = None
         self.recorder: subprocess.Popen | None = None
-        self.recording_path: Path | None = None
         self.stream_thread: threading.Thread | None = None
         self.ready = False
         self.busy = False
@@ -514,7 +458,7 @@ class PurrApplication(Gtk.Application):
         self.replacements_summary = None
         self.practice = self.practice_placeholder = self.overlay_label = None
         self.record_button = self.model_combo = self.model_action = None
-        self.microphone_combo = None
+        self.microphone_combo = self.language_combo = None
         self.microphone_labels: dict[str, str] = {}
         self.model_remove = self.model_description = self.download_progress = None
         self.model_buttons = self.model_state = None
@@ -716,7 +660,7 @@ class PurrApplication(Gtk.Application):
         options = Gtk.Grid(column_spacing=14, row_spacing=10)
         language_label = Gtk.Label(label="Recognition language", xalign=0)
         options.attach(language_label, 0, 0, 1, 1)
-        language = Gtk.ComboBoxText()
+        self.language_combo = language = Gtk.ComboBoxText()
         for code, name in (
             ("en", "English"), ("auto", "Automatic"), ("es", "Spanish"),
             ("de", "German"), ("fr", "French"), ("it", "Italian"),
@@ -972,8 +916,7 @@ class PurrApplication(Gtk.Application):
     def _sync_record_controls(self) -> None:
         label = "Stop Dictation" if self.recorder else "Start Dictation"
         if self.level_meter:
-            # Only a live stream reports levels; batch models record to a file.
-            listening = bool(self.recorder) and self.server.streaming
+            listening = bool(self.recorder)
             self.level_meter.set_visible(listening)
             self.level_bar.set_value(0)
         if self.record_button:
@@ -1082,35 +1025,25 @@ class PurrApplication(Gtk.Application):
             self._notify("Purr cannot type", message)
             return
         try:
-            RUNTIME.mkdir(parents=True, exist_ok=True)
             source = self._default_source()
             self.stream_typed = ""
             self.stream_raw = ""
             self.stream_external_drops = 0
             self.heard_sound = self.silence_warned = False
             self._show_overlay()
-            if self.server.streaming:
-                stream = self.server.begin_stream()
-                self.recorder = subprocess.Popen(
-                    [
-                        "pw-record", "--raw", "--target", source, "--rate", "16000",
-                        "--channels", "1", "--format", "s16", "--latency", "20ms", "-",
-                    ],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                )
-                self.stream_thread = threading.Thread(
-                    target=self._consume_stream, args=(self.recorder, stream), daemon=True
-                )
-                self.stream_thread.start()
-            else:
-                self.recording_path = RUNTIME / f"utterance-{time.monotonic_ns()}.wav"
-                self.recorder = subprocess.Popen(
-                    [
-                        "pw-record", "--target", source, "--rate", "16000", "--channels", "1",
-                        "--format", "s16", "--latency", "20ms", str(self.recording_path),
-                    ],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+            # Audio goes straight from PipeWire to the engine; it never touches disk.
+            stream = self.server.begin_stream()
+            self.recorder = subprocess.Popen(
+                [
+                    "pw-record", "--raw", "--target", source, "--rate", "16000",
+                    "--channels", "1", "--format", "s16", "--latency", "20ms", "-",
+                ],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            self.stream_thread = threading.Thread(
+                target=self._consume_stream, args=(self.recorder, stream), daemon=True
+            )
+            self.stream_thread.start()
             self._set_status(self._listening_status())
             if self.indicator:
                 self.indicator.set_icon_full("media-record-symbolic", "Purr is listening")
@@ -1130,26 +1063,13 @@ class PurrApplication(Gtk.Application):
         self.recorder = None
         self.busy = True
         self._sync_record_controls()
-        self._set_status("Finalizing transcript…" if self.server.streaming else "Transcribing…")
+        self._set_status("Finalizing transcript…")
         if self.indicator:
             self.indicator.set_icon_full("emblem-synchronizing-symbolic", "Purr is transcribing")
         try:
             recorder.send_signal(signal.SIGINT)
         except ProcessLookupError:
             pass
-        if not self.server.streaming:
-            path = self.recording_path
-            self.recording_path = None
-
-            def finish_recording():
-                try:
-                    recorder.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    recorder.kill()
-                    recorder.wait(timeout=2)
-                self._transcribe(path)
-
-            threading.Thread(target=finish_recording, daemon=True).start()
 
     def _consume_stream(self, recorder, stream) -> None:
         raw_text = ""
@@ -1297,55 +1217,23 @@ class PurrApplication(Gtk.Application):
         if error:
             # Everything already typed was finalized by the engine. Keep it, so a
             # late failure cannot erase minutes of dictation.
-            return self._complete("", 0, error)
+            return self._complete(error)
         if duration < 0.20:
-            return self._complete("", 0, "Too short — speak for a moment before stopping")
+            return self._complete("Too short — speak for a moment before stopping")
         if peak_db < SILENCE_DB:
             if self.stream_typed and self.keyboard:
                 self.keyboard.backspace(len(self.stream_typed))
-            return self._complete("", 0, "No speech detected")
+            return self._complete("No speech detected")
         self._stream_update(raw, False, False, True)
         text, _drop_previous = self.processor.apply(raw)
         LOG.info("Live transcript final=%s", self._loggable(text))
         if text and self.keyboard and not text.endswith("\n"):
             self.keyboard.type_text(" ")
-        self._complete("", 0, None)
+        self._complete(None)
         GLib.timeout_add(700, self._hide_overlay)
         return False
 
-    def _transcribe(self, path: Path | None) -> None:
-        try:
-            if not path or not path.exists() or path.stat().st_size <= 44:
-                raise RuntimeError("No microphone audio was captured")
-            with wave.open(str(path), "rb") as audio:
-                duration = audio.getnframes() / audio.getframerate()
-            if duration < 0.20:
-                GLib.idle_add(self._complete, "", 0, "Too short — speak for a moment before stopping")
-                return
-            peak_db, rms_db = normalize_wav(path)
-            LOG.info("Captured %.2fs, peak %.1f dBFS, RMS %.1f dBFS", duration, peak_db, rms_db)
-            if peak_db < SILENCE_DB:
-                GLib.idle_add(self._complete, "", 0, "No speech detected")
-                return
-            raw = self.server.transcribe(path, multipart_body)
-            text, drop_previous = self.processor.apply(raw)
-            LOG.info("Transcript raw=%s final=%s", self._loggable(raw), self._loggable(text))
-            GLib.idle_add(self._complete, text, drop_previous, None)
-        except Exception as error:
-            LOG.exception("Dictation failed")
-            GLib.idle_add(self._complete, "", 0, str(error))
-        finally:
-            if path:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    LOG.warning("Could not remove temporary recording %s", path)
-
-    def _complete(self, text: str, drop_previous: int, message: str | None) -> bool:
-        if self.shortcut_down and (text or drop_previous):
-            # Batch results can arrive while the stop shortcut is still held.
-            GLib.timeout_add(50, self._complete, text, drop_previous, message)
-            return False
+    def _complete(self, message: str | None) -> bool:
         self.busy = False
         self._sync_record_controls()
         if message:
@@ -1358,12 +1246,6 @@ class PurrApplication(Gtk.Application):
                 )
                 self._notify("Purr dictation failed", message)
             return False
-        if drop_previous and self.keyboard:
-            self.keyboard.backspace_word(drop_previous)
-        if text:
-            insertion = text if text.endswith(("\n", "\t", " ")) else text + " "
-            if self.keyboard:
-                self.keyboard.type_text(insertion)
         self._show_ready()
         return False
 
@@ -1376,9 +1258,8 @@ class PurrApplication(Gtk.Application):
             return
         self.model_combo.remove_all()
         for model in MODELS:
-            installed = "  •  installed" if self.store.installed(model) else f"  •  {model.size_label}"
-            live = "  •  live" if model.streaming else ""
-            self.model_combo.append(model.id, model.name + live + installed)
+            installed = "installed" if self.store.installed(model) else model.size_label
+            self.model_combo.append(model.id, f"{model.name}  •  {installed}")
         self.model_combo.set_active_id(active_id)
 
     def _model_changed(self, _combo=None) -> None:
@@ -1401,6 +1282,7 @@ class PurrApplication(Gtk.Application):
             self._shrink_to_content()
         self.model_state.set_visible(active)
         self.model_buttons.set_visible(not active)
+        self._sync_language_choice()
         if active:
             self.model_state.set_text(
                 f"✓  In use  ·  {self.server.backend_label}" if self.ready else "Loading…"
@@ -1411,8 +1293,19 @@ class PurrApplication(Gtk.Application):
         )
         self.model_action.set_sensitive(not self.busy and not self.downloading and not self.recorder)
         self.model_action.show()
-        self.model_remove.set_visible(installed and selected.engine != "whisper")
+        self.model_remove.set_visible(installed)
         return False
+
+    def _sync_language_choice(self) -> None:
+        """The language setting steers only models that take one; say so for the rest."""
+        if not self.language_combo:
+            return
+        self.language_combo.set_sensitive(self.model.uses_language)
+        self.language_combo.set_tooltip_text(
+            None if self.model.uses_language
+            else f"{self.model.name} is English only" if self.model.languages == "English"
+            else f"{self.model.name} detects the language itself"
+        )
 
     def _model_action_clicked(self, _button) -> None:
         selected = self._selected_model()
@@ -1615,8 +1508,6 @@ class PurrApplication(Gtk.Application):
                 self.recorder.kill()
         if self.stream_thread and self.stream_thread.is_alive():
             self.stream_thread.join(timeout=5)
-        if self.recording_path:
-            self.recording_path.unlink(missing_ok=True)
         if self.shortcuts:
             self.shortcuts.close()
         if not self.stream_thread or not self.stream_thread.is_alive():
@@ -1629,10 +1520,9 @@ class PurrApplication(Gtk.Application):
 def smoke_test() -> int:
     failures = []
     for description, path in (
-        ("whisper-server", WHISPER_SERVER),
-        ("Whisper model", MODEL),
         ("parakeet.cpp shared library", PARAKEET_LIB),
         ("Nemotron streaming model", NEMOTRON_MODEL),
+        ("llama-server", LLAMA_SERVER),
         ("application icon", ICON),
         ("uinput device", Path("/dev/uinput")),
     ):
@@ -1653,14 +1543,12 @@ def smoke_test() -> int:
             failures.append("no default PipeWire/PulseAudio source")
     except Exception as error:
         failures.append(f"microphone query failed: {error}")
-    if WHISPER_SERVER.exists():
-        env = os.environ.copy()
-        env["LD_LIBRARY_PATH"] = str(WHISPER_BIN)
+    if LLAMA_SERVER.exists():
         result = subprocess.run(
-            [str(WHISPER_SERVER), "--help"], capture_output=True, text=True, env=env, timeout=10
+            [str(LLAMA_SERVER), "--version"], capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
-            failures.append("whisper-server does not execute")
+            failures.append("llama-server does not execute")
     if failures:
         for failure in failures:
             print("FAIL:", failure)
@@ -1668,8 +1556,7 @@ def smoke_test() -> int:
     print("Purr Linux smoke test passed")
     print("  source:", source)
     print("  default model:", NEMOTRON_MODEL)
-    print("  engine:", PARAKEET_LIB)
-    print("  fallback:", WHISPER_SERVER)
+    print("  engines:", PARAKEET_LIB, "and", LLAMA_SERVER)
     print("  session:", os.environ.get("XDG_SESSION_TYPE", "unknown"))
     return 0
 
@@ -1681,6 +1568,10 @@ def main() -> int:
     if background:
         sys.argv.remove("--background")
     app = PurrApplication(background)
+    # Quit through do_shutdown on SIGTERM/SIGINT, so a running engine server
+    # is stopped instead of orphaned with its GPU memory.
+    for number in (signal.SIGTERM, signal.SIGINT):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, number, lambda: app.quit() or False)
     try:
         return app.run(sys.argv)
     except KeyboardInterrupt:

@@ -1,9 +1,9 @@
 # Purr on Linux
 
 The Linux port provides private, local dictation as a GTK 3 application with a
-top-bar indicator. It records through PipeWire, transcribes locally with
-`parakeet.cpp` or `whisper.cpp`, and types results into the focused application
-through a `/dev/uinput` virtual keyboard.
+top-bar indicator. It records through PipeWire, transcribes live and locally
+with `parakeet.cpp` or `llama.cpp`, and types results into the focused
+application through a `/dev/uinput` virtual keyboard.
 
 ## Support status
 
@@ -87,16 +87,17 @@ purr
 
 `make linux-install` performs these steps:
 
-1. Clones pinned `parakeet.cpp` and `whisper.cpp` release tags into
-   `.build-linux/` and builds both with Vulkan.
-2. Downloads the default Nemotron streaming model and the Whisper fallback.
+1. Clones pinned `parakeet.cpp` and `llama.cpp` release tags into
+   `.build-linux/` and builds both with Vulkan (only `llama-server` from
+   `llama.cpp`). Changing a pinned tag rebuilds that engine from a clean clone.
+2. Downloads the default Nemotron streaming model and verifies its SHA-256.
 3. Runs the Python unit tests and a runtime smoke test.
 4. Adds a `~/.local/bin/purr` symlink, desktop entry, GNOME sign-in autostart
    entry, and the GNOME custom shortcut.
 
 The launcher points back into the checkout, so keep the repository in the same
-location after installation. The initial model downloads total about 1.3 GiB;
-the complete build directory is currently about 2.3 GiB and can vary by toolchain.
+location after installation. The default model is a 748 MiB download; the
+complete build directory is currently about 1.9 GiB and can vary by toolchain.
 
 Run checks again at any time with:
 
@@ -159,39 +160,55 @@ Changes apply to the next words you dictate, with no restart.
 
 ## Models
 
-The settings window can download, activate, and remove the optional Parakeet
-models. Whisper is installed as the built-in compatibility fallback and is not
-removable from the window.
+Every model types live while you speak; models that only transcribe after you
+stop are not offered. The settings window downloads, switches, and removes
+them, and verifies each download against its published SHA-256.
 
-| Model | Approx. size | Mode | Languages |
-| --- | ---: | --- | --- |
-| NVIDIA Nemotron 3.5 Streaming Q5 | 748 MiB | Live, default | 40+ prompted locales |
-| NVIDIA Parakeet Realtime EOU 120M Q5 | 135 MiB | Live, lowercase without punctuation | English |
-| NVIDIA Parakeet TDT 0.6B V2 Q5 | 672 MiB | Batch | English |
-| NVIDIA Parakeet TDT 0.6B V3 Q5 | 708 MiB | Batch | 25 European languages |
-| NVIDIA Parakeet TDT-CTC 110M Q5 | 137 MiB | Batch | English |
-| Whisper Large V3 Turbo Q5 | 548 MiB | Batch fallback | Multilingual |
+| Model | Download | Languages | Output | GPU memory | Speed on a Radeon 8060S |
+| --- | ---: | --- | --- | ---: | --- |
+| NVIDIA Nemotron 3.5 Streaming Q5 (default) | 748 MiB | 40+ locales, chosen in the language menu | Punctuated and capitalized | about 0.8 GiB | about 11× real time |
+| Mistral Voxtral Mini 4B Realtime Q4_K_M | 3.4 GiB | 13, detected automatically | Punctuated and capitalized, about 0.5 s behind your voice | about 5.6 GiB | about 3× real time |
+| NVIDIA Parakeet Realtime EOU 120M Q5 | 135 MiB | English | Lowercase without punctuation | about 0.2 GiB | about 13× real time |
 
-Realtime EOU writes lowercase text without punctuation; Purr capitalizes the
-pronoun “I” for it when the recognition language is English.
+- **Nemotron** is the best balance and the default. Purr renews its stream at
+  natural pauses so punctuation does not fade during long dictation.
+- **Voxtral** is the largest live model. It handles Arabic, Chinese, Dutch,
+  English, French, German, Hindi, Italian, Japanese, Korean, Portuguese,
+  Russian, and Spanish without a language setting, so the language menu is
+  greyed out while it is in use. It needs a GPU fast enough to stay ahead of
+  your voice; on a slower GPU the words fall behind and the end of a dictation
+  takes longer to arrive. Purr moves long dictation to a fresh Voxtral session
+  at a pause every few minutes to keep its memory bounded.
+- **Realtime EOU** is the lightest, for modest GPUs. It writes lowercase text
+  without punctuation; Purr capitalizes the pronoun “I” for it when the
+  recognition language is English.
 
-Nemotron and Parakeet run through
-[`parakeet.cpp`](https://github.com/mudler/parakeet.cpp). The Q5 GGUF conversions
-come from [`mudler/parakeet-cpp-gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf)
-and retain the terms of their original NVIDIA model cards. Whisper runs through
-[`whisper.cpp`](https://github.com/ggml-org/whisper.cpp).
+Nemotron and Realtime EOU run in-process through
+[`parakeet.cpp`](https://github.com/mudler/parakeet.cpp) with GGUF conversions
+from [`mudler/parakeet-cpp-gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf).
+Voxtral runs in a local `llama-server` from
+[`llama.cpp`](https://github.com/ggml-org/llama.cpp), which Purr starts on a
+`127.0.0.1` port and stops when you switch models, using the
+[`ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF`](https://huggingface.co/ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF)
+conversion. Each model keeps the terms of its original model card.
 
-The language menu currently exposes English, automatic detection, Spanish,
-German, French, Italian, Portuguese, Dutch, and Polish. `initial_prompt` can be
-set directly in the JSON configuration.
+Earlier versions also offered Parakeet TDT V2, TDT V3, TDT-CTC 110M, and
+Whisper Large V3 Turbo, which transcribe only after you stop. A configuration
+that still selects one of them starts Nemotron instead. Their files in
+`.build-linux/models/` and the old `.build-linux/whisper.cpp/` build are no
+longer used and can be deleted.
+
+The language menu exposes English, automatic detection, Spanish, German,
+French, Italian, Portuguese, Dutch, and Polish for Nemotron.
 
 ## Local data and network access
 
 Purr has no account, analytics, crash reporter, cloud transcription, or remote
 service. The build needs network access for source code, Arch packages, and
 model weights. Downloading another model from the settings window contacts
-Hugging Face. Inference itself stays on the machine; Whisper's HTTP server binds
-only to an ephemeral `127.0.0.1` port.
+Hugging Face. Inference itself stays on the machine; while Voxtral is in use,
+its `llama-server` listens only on an ephemeral `127.0.0.1` port. Recorded audio
+streams straight from PipeWire to the engine and is never written to disk.
 
 Linux files are stored in these locations:
 
@@ -200,8 +217,7 @@ Linux files are stored in these locations:
 | `<checkout>/.build-linux/` | Compiled engines and downloaded models |
 | `~/.config/purr/config.json` | Model, language, microphone, and dictation preferences |
 | `~/.local/state/purr/purr.log` | Rotating application log |
-| `~/.local/state/purr/whisper-server.log` | Whisper engine log |
-| `$XDG_RUNTIME_DIR/purr/` | Temporary batch audio, removed after transcription |
+| `~/.local/state/purr/llama-server.log` | Voxtral engine log |
 | `~/.local/share/applications/com.arunbrahma.purr.desktop` | Per-user launcher |
 | `~/.config/autostart/com.arunbrahma.purr.desktop` | Per-user sign-in autostart entry |
 
@@ -224,7 +240,6 @@ The GUI writes `~/.config/purr/config.json`. Supported keys are:
 - `dictionary`: JSON object mapping spoken forms to replacements (edited by
   **Replacements → Edit…**)
 - `log_transcripts`: include dictated text in `purr.log` (default `false`)
-- `initial_prompt`: optional Whisper prompt
 - `show_overlay`: show a non-focusable listening overlay
 
 Quit Purr before editing this file by hand so the GUI cannot overwrite the
@@ -252,7 +267,7 @@ logs should not be retained.
 - Run `make linux-check`; it reports missing runtime binaries, model files,
   microphone setup, and `/dev/uinput` access.
 - Inspect `~/.local/state/purr/purr.log` for application errors and
-  `whisper-server.log` for Whisper startup failures.
+  `llama-server.log` for Voxtral startup failures.
 - If no microphone appears, check `pactl get-default-source` and verify that
   PipeWire PulseAudio compatibility is running.
 - If the shortcut does nothing, open GNOME Settings → Keyboard → Custom
@@ -260,8 +275,8 @@ logs should not be retained.
   `gapplication action com.arunbrahma.purr dictate`.
 - If direct typing fails, recheck `/dev/uinput` access. Purr types only through
   its virtual keyboard, so dictation will not start without it.
-- If a batch model feels unresponsive, remember that it emits text only after
-  the stop shortcut. Use Nemotron or Realtime EOU for live output.
+- If Voxtral's words fall further and further behind your voice, the GPU is
+  not fast enough for it; switch back to Nemotron.
 
 Please include the Linux distribution, desktop, session type, GPU, selected
 model, and output from `make linux-check` in a bug report. Review logs first and

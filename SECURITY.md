@@ -92,8 +92,8 @@ The Linux port has a smaller but still sensitive permission set:
   application action
 
 Purr's Linux shortcut does not monitor raw keyboard input: GNOME recognizes the configured
-shortcut and invokes a D-Bus application action. Temporary batch audio is deleted after
-transcription. Diagnostic logs record word counts rather than dictated text
+shortcut and invokes a D-Bus application action. Audio streams from PipeWire straight to
+the transcription engine and is never written to disk. Diagnostic logs record word counts rather than dictated text
 unless `log_transcripts` is turned on. See
 [LINUX.md](LINUX.md#local-data-and-network-access) for exact paths.
 
@@ -115,10 +115,11 @@ The macOS application makes these outbound connections:
 The updater refuses any download URL whose host is not exactly `github.com` over HTTPS,
 even if the GitHub API response names one.
 
-The Linux build additionally clones pinned engine tags from GitHub, downloads models from
-Hugging Face. Optional model
-downloads in the Linux GUI contact Hugging Face. The local Whisper HTTP process binds only
-to `127.0.0.1` on an ephemeral port.
+The Linux build additionally clones pinned engine tags from GitHub and downloads the default
+model from Hugging Face. Optional model downloads in the Linux GUI contact Hugging Face.
+While Voxtral is the selected model, a local `llama-server` process listens only on
+`127.0.0.1` at an ephemeral port, without authentication; other programs running on the
+machine could send it audio to transcribe, as they could run a local model themselves.
 
 Audio is never uploaded. Transcription runs locally on the Apple Neural Engine on macOS and
 through local Vulkan/CPU inference on Linux.
@@ -146,8 +147,8 @@ Preferences live in `defaults` under `com.arunbrahma.purr`.
 
 On Linux, models and engines live under the checkout's `.build-linux/` directory,
 preferences live at `~/.config/purr/config.json`, and plaintext diagnostic logs live under
-`~/.local/state/purr/`. Temporary batch audio uses `$XDG_RUNTIME_DIR/purr/` and is removed
-after transcription. The Linux port does not save transcript documents.
+`~/.local/state/purr/`. Recorded audio is never written to disk, and the Linux port does
+not save transcript documents.
 
 ### Release integrity
 
@@ -197,10 +198,10 @@ Known weaknesses include:
 - **Model weights are third-party.** Purr verifies the Gemma GGUF against a pinned SHA-256
   and pins the llama.cpp XCFramework by checksum, but weights fetched by WhisperKit and
   FluidAudio are subject to those projects' own integrity handling.
-- **Linux downloads are not cryptographically verified.** Engine source is selected by
-  release tag rather than immutable commit, the Whisper download helper controls its model
-  URL, and Linux GGUF files are currently checked only by expected byte length. A mutable
-  tag or compromised download origin is therefore in the Linux build's trust boundary.
+- **Linux engine source is pinned by tag, not by commit.** Model files are pinned to
+  Hugging Face repository revisions and checked against their published SHA-256 before
+  use, but `parakeet.cpp` and `llama.cpp` are cloned by release tag. A moved tag or a
+  compromised GitHub repository is therefore in the Linux build's trust boundary.
 - **The Linux port has no packaged release or update channel.** Users run build code and
   newly pulled source directly from their checkout. Review changes before rebuilding.
 
@@ -213,7 +214,7 @@ path, model download and verification, permission handling, text injection, the 
 in `Sources/CEcho`, transcript/log storage, and the signing and release pipeline.
 
 **Out of scope:** vulnerabilities solely in upstream dependencies (report those to
-WhisperKit, FluidAudio, llama.cpp, SpeexDSP, parakeet.cpp, or whisper.cpp directly, with a
+WhisperKit, FluidAudio, llama.cpp, SpeexDSP, or parakeet.cpp directly, with a
 heads-up here if Purr is affected), the operating system itself, and the fact that Purr
 requires the documented permissions. Reports consisting only of automated scanner output
 with no demonstrated impact may be closed.

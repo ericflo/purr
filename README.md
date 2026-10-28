@@ -9,7 +9,7 @@
 [![Linux: GNOME Wayland](https://img.shields.io/badge/Linux-GNOME%20Wayland-4a86cf?logo=linux)](LINUX.md)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-orange)](#)
 [![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)](#)
-[![Local ASR](https://img.shields.io/badge/ASR-Parakeet%20%2B%20Whisper-purple)](#)
+[![Local ASR](https://img.shields.io/badge/ASR-Parakeet%20%C2%B7%20Nemotron%20%C2%B7%20Voxtral-purple)](#)
 
 ### Press a shortcut. Speak. Your words type into any text field - 100% local, on-device.
 
@@ -57,7 +57,7 @@ purr
 ```
 
 The first build downloads and compiles pinned versions of `parakeet.cpp` and
-`whisper.cpp`, then downloads about 1.3 GiB of default model weights. It also
+`llama.cpp`, then downloads the 748 MiB default model. It also
 installs a per-user desktop launcher, sign-in autostart entry, and the native
 GNOME <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> shortcut. Tap the shortcut
 to start dictation and tap it again to stop.
@@ -103,7 +103,7 @@ While a meeting is recording, the dictation hotkey is suspended so a reflexive p
 ## Features
 
 - **Two transcription engines**: Parakeet TDT v2 (default) is English-only, on-device, and the fastest option on Apple Silicon. Switch to WhisperKit (Whisper Tiny EN through Large V3 Turbo) when you need another language.
-- **Native Linux live transcription**: Nemotron 3.5 Streaming is the default on Linux, with cache-aware partial results, punctuation, capitalization, prompt-selected multilingual recognition, and a Whisper Large V3 Turbo fallback.
+- **Native Linux live transcription**: every Linux model types while you speak. Nemotron 3.5 Streaming is the default, with cache-aware partial results, punctuation, capitalization, and prompt-selected multilingual recognition; Voxtral Mini 4B Realtime and Parakeet Realtime EOU are optional downloads.
 - **Wayland-safe text injection**: Finalized words are typed through a local virtual keyboard. Unicode compose handles accents, symbols, and non-Latin text without relying on background clipboard access.
 - **Smart Typing**: With Parakeet, words appear live in the focused app as you speak instead of only landing on key release. Each phrase stays separately undoable and coexists cleanly with autocorrect and IMEs.
 - **Meeting mode**: Captures your mic and your Mac's system audio together, so everyone on a call is transcribed. Echo cancellation and offline speaker diarization (FluidAudio) label each voice, and transcripts save as Markdown to a folder you choose.
@@ -125,10 +125,9 @@ While a meeting is recording, the dictation hotkey is suspended so a reflexive p
 | macOS on Intel or macOS 13 and earlier | Not supported; the macOS engine requires CoreML/ANE and Sonoma+ APIs |
 | Windows, iOS, and iPadOS | Not supported |
 
-On Linux, `make linux-install` builds pinned `parakeet.cpp` and `whisper.cpp`
-engines with Vulkan, downloads NVIDIA Nemotron 3.5 Streaming Q5 plus Whisper
-Large V3 Turbo Q5 as a fallback, installs the user launcher and autostart entry,
-and runs the test and smoke-test suite.
+On Linux, `make linux-install` builds pinned `parakeet.cpp` and `llama.cpp`
+engines with Vulkan, downloads NVIDIA Nemotron 3.5 Streaming Q5, installs the
+user launcher and autostart entry, and runs the test and smoke-test suite.
 
 Nemotron is the default: the microphone opens the instant you tap the shortcut,
 so you can start talking immediately, and cache-aware transcription is typed
@@ -137,14 +136,15 @@ time limit on a dictation. Purr renews the stream at natural pauses, so long
 dictation stays punctuated instead of turning into one run-on sentence. Linux
 Unicode compose is used for accents, symbols, and non-Latin text, avoiding
 background Wayland clipboard restrictions. Say “scratch that” to remove the
-preceding dictated word immediately. The second tap finalizes the stream. The
-GUI can download, select, and remove these additional local models:
+preceding dictated word immediately. The second tap finalizes the stream.
+Every Linux model is live; models that only transcribe after you stop are not
+offered. The GUI can download, select, and remove two more:
 
-- NVIDIA Parakeet Realtime EOU 120M (English live streaming, lowercase without punctuation)
-- NVIDIA Parakeet TDT 0.6B V2 (English batch accuracy)
-- NVIDIA Parakeet TDT 0.6B V3 (25-language batch accuracy)
-- NVIDIA Parakeet TDT-CTC 110M (small and fast)
-- Whisper Large V3 Turbo (broad-language compatibility fallback)
+- Mistral Voxtral Mini 4B Realtime (13 languages detected automatically,
+  punctuated, about half a second behind your voice; needs a capable GPU with
+  about 6 GB of free memory)
+- NVIDIA Parakeet Realtime EOU 120M (tiny English model, lowercase without
+  punctuation)
 
 Purr starts automatically on sign-in and keeps running in the top bar when its
 window is closed. The window includes a practice box for trying dictation, a
@@ -160,8 +160,8 @@ files, update/uninstall steps, architecture, and common failure modes.
 <summary><strong>Does my audio leave my computer?</strong></summary>
 
 No. Recording, transcription, and post-processing happen on-device. macOS uses
-the Apple Neural Engine; Linux uses local Vulkan inference (or Whisper's CPU
-fallback). There is no telemetry and no cloud transcription. Network access is
+the Apple Neural Engine; Linux uses local Vulkan inference. There is no
+telemetry and no cloud transcription. Network access is
 used to fetch source dependencies, models, and macOS updates.
 
 </details>
@@ -170,9 +170,9 @@ used to fetch source dependencies, models, and macOS updates.
 <summary><strong>Which mode is lowest-latency?</strong></summary>
 
 On macOS, use Parakeet with Smart Typing enabled, so finalized words appear as
-you speak. On Linux, the default Nemotron model and optional Realtime EOU model
-always type live;
-the batch Parakeet models and Whisper wait until the utterance finishes.
+you speak. On Linux, every model types live. Realtime EOU is the lightest,
+Nemotron (the default) has the best balance, and Voxtral runs about half a
+second behind your voice in exchange for its larger model.
 
 </details>
 
@@ -180,9 +180,9 @@ the batch Parakeet models and Whisper wait until the utterance finishes.
 <summary><strong>What languages can I dictate in?</strong></summary>
 
 On macOS, the default Parakeet engine is English-only; WhisperKit supports
-roughly 100 languages. On Linux, Nemotron supports 40+ prompted locales, the
-Parakeet V3 option supports 25 European languages, and Whisper provides the
-broadest compatibility. Select the language and model in the window.
+roughly 100 languages. On Linux, Nemotron supports 40+ locales selected in the
+window, Voxtral detects 13 languages by itself, and Realtime EOU is English
+only. Select the model and language in the window.
 
 </details>
 
@@ -209,9 +209,9 @@ packages.
 <summary><strong>How big is the model download?</strong></summary>
 
 On macOS, the default Parakeet model is about 450 MB. The Linux build downloads
-about 1.3 GiB for Nemotron and the Whisper fallback and currently occupies
-about 2.3 GiB including compiled engines; optional Linux models are 135–708 MB
-each.
+the 748 MiB Nemotron model and currently occupies about 1.9 GiB including compiled
+engines; the optional Linux models are 135 MiB (Realtime EOU) and 3.4 GiB
+(Voxtral, model plus audio projector).
 
 </details>
 
@@ -301,5 +301,5 @@ Purr builds on open-source work in two categories, handled differently.
 - **llama.cpp** (ggml-org) - MIT, embedded as an Apple XCFramework; runs the Gemma summaries.
 - **SpeexDSP** (Xiph.Org) - BSD-3-Clause, vendored from source for meeting echo cancellation.
 - **parakeet.cpp** (LocalAI contributors) - MIT, compiled from a pinned tag for Linux ASR.
-- **whisper.cpp** (ggml contributors) - MIT, compiled from a pinned tag for the Linux Whisper fallback.
-- **NVIDIA Linux model weights** - downloaded on demand and governed by each original model card's terms; the GGUF conversions come from [`mudler/parakeet-cpp-gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf).
+- **llama.cpp** (ggml-org) - MIT, compiled from a pinned tag for Linux; `llama-server` runs Voxtral Realtime.
+- **Linux model weights** - downloaded on demand and governed by each original model card's terms: NVIDIA Nemotron 3.5 Streaming (OpenMDW-1.1) and Parakeet Realtime EOU (NVIDIA Open Model License), converted in [`mudler/parakeet-cpp-gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf); Mistral Voxtral Mini 4B Realtime (Apache-2.0), converted in [`ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF`](https://huggingface.co/ggml-org/Voxtral-Mini-4B-Realtime-2602-GGUF).

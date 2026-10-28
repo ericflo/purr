@@ -52,15 +52,15 @@ export DEVELOPER_DIR
 
 UNAME_S        := $(shell uname -s)
 LINUX_BUILD    := .build-linux
-WHISPER_TAG    := v1.9.2
-WHISPER_DIR    := $(LINUX_BUILD)/whisper.cpp
-WHISPER_BIN    := $(WHISPER_DIR)/build/bin/whisper-server
-WHISPER_MODEL  := $(LINUX_BUILD)/models/ggml-large-v3-turbo-q5_0.bin
-PARAKEET_TAG   := v0.5.0
+PARAKEET_TAG   := v0.6.1
 PARAKEET_DIR   := $(LINUX_BUILD)/parakeet.cpp
 PARAKEET_LIB   := $(PARAKEET_DIR)/build/libparakeet.so
+LLAMA_TAG      := b11946
+LLAMA_DIR      := $(LINUX_BUILD)/llama.cpp
+LLAMA_SERVER   := $(LLAMA_DIR)/build/bin/llama-server
 NEMOTRON_MODEL := $(LINUX_BUILD)/models/nemotron-3.5-asr-streaming-0.6b-q5_k.gguf
 NEMOTRON_URL   := https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/bf0af9f425fa01809cadec671b3cb672709d13e9/nemotron-3.5-asr-streaming-0.6b-q5_k.gguf
+NEMOTRON_SHA256 := 7bb14605a707f821560952521034002c91653d676272a80dca0cd2aa886d0ab2
 LINUX_APP_ID   := com.arunbrahma.purr
 LINUX_EXEC     := $(CURDIR)/linux/purr
 
@@ -74,31 +74,18 @@ else
 all: app
 endif
 
-# Native Linux/Wayland build. whisper.cpp stays in the ignored build directory;
-# only the thin Purr integration is tracked in this repository.
-$(WHISPER_DIR)/.git:
+# Native Linux/Wayland build. The engines stay in the ignored build directory;
+# only the thin Purr integration is tracked in this repository. Each clone is
+# keyed by a stamp named for its tag, so changing a tag rebuilds that engine
+# from a clean checkout of the new release.
+$(PARAKEET_DIR)/.purr-$(PARAKEET_TAG):
 	@mkdir -p $(LINUX_BUILD)
-	git clone --depth 1 --branch $(WHISPER_TAG) https://github.com/ggml-org/whisper.cpp.git $(WHISPER_DIR)
-
-$(WHISPER_BIN): $(WHISPER_DIR)/.git
-	cmake -S $(WHISPER_DIR) -B $(WHISPER_DIR)/build -G Ninja \
-	  -DCMAKE_BUILD_TYPE=Release \
-	  -DGGML_VULKAN=ON \
-	  -DWHISPER_BUILD_TESTS=OFF \
-	  -DWHISPER_BUILD_SERVER=ON \
-	  -DWHISPER_BUILD_EXAMPLES=ON
-	cmake --build $(WHISPER_DIR)/build --target whisper-server -j "$$(nproc)"
-
-$(WHISPER_MODEL): $(WHISPER_DIR)/.git
-	@mkdir -p $(LINUX_BUILD)/models
-	$(WHISPER_DIR)/models/download-ggml-model.sh large-v3-turbo-q5_0 $(LINUX_BUILD)/models
-
-$(PARAKEET_DIR)/.git:
-	@mkdir -p $(LINUX_BUILD)
+	rm -rf $(PARAKEET_DIR)
 	git clone --depth 1 --branch $(PARAKEET_TAG) --recurse-submodules --shallow-submodules \
 	  https://github.com/mudler/parakeet.cpp.git $(PARAKEET_DIR)
+	@touch $@
 
-$(PARAKEET_LIB): $(PARAKEET_DIR)/.git
+$(PARAKEET_LIB): $(PARAKEET_DIR)/.purr-$(PARAKEET_TAG)
 	cmake -S $(PARAKEET_DIR) -B $(PARAKEET_DIR)/build -G Ninja \
 	  -DCMAKE_BUILD_TYPE=Release \
 	  -DPARAKEET_SHARED=ON \
@@ -108,16 +95,37 @@ $(PARAKEET_LIB): $(PARAKEET_DIR)/.git
 	  -DPARAKEET_BUILD_SERVER=ON
 	cmake --build $(PARAKEET_DIR)/build --target parakeet parakeet-cli parakeet-server -j "$$(nproc)"
 
+# llama.cpp serves Voxtral Realtime over its /v1/realtime websocket. Only the
+# server is built; the model itself is an optional download in Purr's window.
+$(LLAMA_DIR)/.purr-$(LLAMA_TAG):
+	@mkdir -p $(LINUX_BUILD)
+	rm -rf $(LLAMA_DIR)
+	git clone --depth 1 --branch $(LLAMA_TAG) https://github.com/ggml-org/llama.cpp.git $(LLAMA_DIR)
+	@touch $@
+
+$(LLAMA_SERVER): $(LLAMA_DIR)/.purr-$(LLAMA_TAG)
+	cmake -S $(LLAMA_DIR) -B $(LLAMA_DIR)/build -G Ninja \
+	  -DCMAKE_BUILD_TYPE=Release \
+	  -DGGML_VULKAN=ON \
+	  -DLLAMA_CURL=OFF \
+	  -DLLAMA_BUILD_TESTS=OFF \
+	  -DLLAMA_BUILD_EXAMPLES=OFF \
+	  -DLLAMA_BUILD_SERVER=ON \
+	  -DLLAMA_BUILD_UI=OFF \
+	  -DLLAMA_USE_PREBUILT_UI=OFF
+	cmake --build $(LLAMA_DIR)/build --target llama-server -j "$$(nproc)"
+
 $(NEMOTRON_MODEL):
 	@mkdir -p $(LINUX_BUILD)/models
 	@partial="$@.part"; \
 	  curl --fail --location --retry 3 --continue-at - --output "$$partial" $(NEMOTRON_URL); \
 	  test "$$(stat -c %s "$$partial")" = "784801888" || { rm -f "$$partial"; echo "Nemotron download was incomplete"; exit 1; }; \
+	  echo "$(NEMOTRON_SHA256)  $$partial" | sha256sum --check --quiet || { rm -f "$$partial"; echo "Nemotron download failed its checksum"; exit 1; }; \
 	  mv "$$partial" "$@"
 
-linux: $(WHISPER_BIN) $(WHISPER_MODEL) $(PARAKEET_LIB) $(NEMOTRON_MODEL)
+linux: $(PARAKEET_LIB) $(LLAMA_SERVER) $(NEMOTRON_MODEL)
 	chmod +x linux/purr
-	@echo "Built Purr for Linux (Vulkan + NVIDIA Nemotron live streaming + Whisper fallback)."
+	@echo "Built Purr for Linux (Vulkan live transcription: parakeet.cpp + llama.cpp)."
 
 linux-check: linux
 	PYTHONPATH=linux python3 -m unittest discover -s linux -p 'test_*.py' -v
