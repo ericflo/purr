@@ -34,7 +34,7 @@ sudo pacman -S --needed \
   python-gobject gtk3 libayatana-appindicator \
   gnome-shell-extension-appindicator \
   pipewire-audio pipewire-pulse libpulse libnotify \
-  vulkan-headers shaderc vulkan-icd-loader vulkan-tools
+  vulkan-headers spirv-headers shaderc vulkan-icd-loader vulkan-tools
 ```
 
 Install one Vulkan implementation for the active GPU:

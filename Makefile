@@ -63,6 +63,9 @@ NEMOTRON_URL   := https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/bf0af9
 NEMOTRON_SHA256 := 7bb14605a707f821560952521034002c91653d676272a80dca0cd2aa886d0ab2
 LINUX_APP_ID   := com.arunbrahma.purr
 LINUX_EXEC     := $(CURDIR)/linux/purr
+# The interpreter linux/purr runs, which has the distribution's python-gobject.
+# A plain python3 can resolve to a toolchain manager's interpreter without it.
+LINUX_PYTHON   ?= /usr/bin/python3
 
 .DEFAULT_GOAL := all
 
@@ -128,7 +131,7 @@ linux: $(PARAKEET_LIB) $(LLAMA_SERVER) $(NEMOTRON_MODEL)
 	@echo "Built Purr for Linux (Vulkan live transcription: parakeet.cpp + llama.cpp)."
 
 linux-check: linux
-	PYTHONPATH=linux python3 -m unittest discover -s linux -p 'test_*.py' -v
+	PYTHONPATH=linux $(LINUX_PYTHON) -m unittest discover -s linux -p 'test_*.py' -v
 	linux/purr --smoke-test
 
 linux-install: linux linux-check
