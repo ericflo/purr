@@ -123,12 +123,19 @@ the settings window is closed and starts automatically on future sign-ins.
 If Purr cannot start yet (the model is still loading, the previous dictation is
 still finishing, or the engine failed), the tap shows a notification explaining
 why instead of doing nothing. If the microphone stops or disappears during
-dictation, Purr keeps the words already typed and says that dictation ended. The top-bar menu's **Start Dictation** item
-switches to **Stop Dictation** while Purr is listening.
+dictation, Purr keeps the words already typed and says that dictation ended.
+The top-bar menu's **Start Dictation** item switches to **Stop Dictation** while
+Purr is listening.
+
+If the microphone delivers only silence for the first three seconds (muted,
+switched off, or the wrong device), Purr warns right away with a notification
+instead of waiting until you stop. The warning clears as soon as it hears
+sound, and dictation keeps running either way.
 
 The Purr window has a practice box: **Start Dictation** in the window types
 into it, so you can try dictation, voice commands, and microphones without
-touching another app.
+touching another app. While listening, a level meter beside the status shows
+what the microphone hears.
 
 Click **Shortcut…** in Purr to open GNOME's keyboard settings. Purr preserves a
 shortcut changed there and shows the new one immediately. All text is typed
@@ -143,6 +150,11 @@ default until it returns.
 Spoken commands include “new paragraph,” “new line,” punctuation names, and
 “scratch that.” The last command removes the preceding dictated word, including
 one already typed by the current live stream.
+
+**Replacements → Edit…** fixes words Purr mishears or spells the wrong way: when
+Purr hears the words on the left, it types the text on the right (for example,
+“type script” → “TypeScript”). Matching ignores case and applies to whole words.
+Changes apply to the next words you dictate, with no restart.
 
 ## Models
 
@@ -166,8 +178,8 @@ and retain the terms of their original NVIDIA model cards. Whisper runs through
 [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp).
 
 The language menu currently exposes English, automatic detection, Spanish,
-German, French, Italian, Portuguese, Dutch, and Polish. `initial_prompt` and
-dictionary replacements can also be set directly in the JSON configuration.
+German, French, Italian, Portuguese, Dutch, and Polish. `initial_prompt` can be
+set directly in the JSON configuration.
 
 ## Local data and network access
 
@@ -205,7 +217,8 @@ The GUI writes `~/.config/purr/config.json`. Supported keys are:
 - `microphone_label`: friendly name of that source, shown while it is unplugged
 - `trim_fillers`: remove common fillers such as “um” and “uh”
 - `voice_commands`: enable spoken punctuation and “scratch that”
-- `dictionary`: JSON object mapping spoken forms to replacements
+- `dictionary`: JSON object mapping spoken forms to replacements (edited by
+  **Replacements → Edit…**)
 - `log_transcripts`: include dictated text in `purr.log` (default `false`)
 - `initial_prompt`: optional Whisper prompt
 - `show_overlay`: show a non-focusable listening overlay

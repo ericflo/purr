@@ -50,6 +50,10 @@ ICON = ROOT / "Resources" / "purr_app_logo.png"
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / "purr"
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "purr"
 CONFIG_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "purr/config.json"
+# Peak level below which a recording counts as silence (a muted or dead microphone).
+SILENCE_DB = -55.0
+# How long Purr listens to unbroken silence before warning that it hears nothing.
+SILENCE_WARNING_SECONDS = 3.0
 
 
 def setup_logging() -> logging.Logger:
@@ -492,11 +496,14 @@ class PurrApplication(Gtk.Application):
         self.stream_typed = ""
         self.stream_raw = ""
         self.stream_external_drops = 0
+        self.heard_sound = self.silence_warned = False
         self.shortcut_down = False
         self.shortcut_guard = 0
         self.shortcut_pressed_at = 0.0
         self.window = self.overlay = None
         self.status_label = self.status_icon = self.status_spinner = None
+        self.level_meter = self.level_bar = None
+        self.replacements_summary = None
         self.practice = self.practice_placeholder = self.overlay_label = None
         self.record_button = self.model_combo = self.model_action = None
         self.microphone_combo = None
@@ -609,6 +616,20 @@ class PurrApplication(Gtk.Application):
         self.status_label.set_line_wrap(True)
         self.status_label.get_style_context().add_class("purr-status")
         status_row.pack_start(self.status_label, True, True, 0)
+        # What the microphone hears while listening, so a muted or wrong
+        # microphone shows up at once rather than after a minute of talking.
+        self.level_bar = Gtk.LevelBar(min_value=0, max_value=1, valign=Gtk.Align.CENTER)
+        for offset in (Gtk.LEVEL_BAR_OFFSET_LOW, Gtk.LEVEL_BAR_OFFSET_HIGH, Gtk.LEVEL_BAR_OFFSET_FULL):
+            self.level_bar.remove_offset_value(offset)
+        self.level_bar.set_size_request(110, 8)
+        self.level_meter = Gtk.Box(spacing=6, tooltip_text="What the microphone hears")
+        microphone = Gtk.Image.new_from_icon_name("audio-input-microphone-symbolic", Gtk.IconSize.BUTTON)
+        microphone.get_style_context().add_class("dim-label")
+        for part in (microphone, self.level_bar):
+            self.level_meter.pack_start(part, False, False, 0)
+            part.show()  # show_all() skips everything inside a no-show-all widget
+        self.level_meter.set_no_show_all(True)
+        status_row.pack_end(self.level_meter, False, False, 0)
         status_card.pack_start(status_row, False, False, 0)
         # Dictation started from this window types here. A real text field
         # gives the typed keys a home and keeps focus off the buttons, where a
@@ -708,14 +729,24 @@ class PurrApplication(Gtk.Application):
         self._populate_microphones()
         self.microphone_combo.set_hexpand(True)
         options.attach(self.microphone_combo, 1, 1, 1, 1)
+        options.attach(Gtk.Label(label="Replacements", xalign=0), 0, 2, 1, 1)
+        replacements = Gtk.Box(spacing=10)
+        self.replacements_summary = Gtk.Label(xalign=0, hexpand=True)
+        self.replacements_summary.get_style_context().add_class("dim-label")
+        replacements.pack_start(self.replacements_summary, True, True, 0)
+        edit = Gtk.Button(label="Edit…")
+        edit.connect("clicked", self._edit_replacements)
+        replacements.pack_start(edit, False, False, 0)
+        options.attach(replacements, 1, 2, 1, 1)
+        self._show_replacements_summary()
         commands = Gtk.CheckButton(label='Enable voice commands, including “scratch that”')
         commands.set_active(bool(self.config.get("voice_commands", True)))
         commands.connect("toggled", self._commands_changed)
-        options.attach(commands, 0, 2, 2, 1)
+        options.attach(commands, 0, 3, 2, 1)
         fillers = Gtk.CheckButton(label="Remove filler words such as “um” and “uh”")
         fillers.set_active(bool(self.config.get("trim_fillers", True)))
         fillers.connect("toggled", self._fillers_changed)
-        options.attach(fillers, 0, 3, 2, 1)
+        options.attach(fillers, 0, 4, 2, 1)
         settings_card.pack_start(options, False, False, 0)
         outer.pack_start(settings_card, False, False, 0)
 
@@ -899,8 +930,16 @@ class PurrApplication(Gtk.Application):
 
         GLib.timeout_add(milliseconds, restore)
 
+    def _listening_status(self) -> str:
+        return f"Listening… tap {self._shortcut_text()} again to finish"
+
     def _sync_record_controls(self) -> None:
         label = "Stop Dictation" if self.recorder else "Start Dictation"
+        if self.level_meter:
+            # Only a live stream reports levels; batch models record to a file.
+            listening = bool(self.recorder) and self.server.streaming
+            self.level_meter.set_visible(listening)
+            self.level_bar.set_value(0)
         if self.record_button:
             self.record_button.set_label(label)
             self.record_button.set_sensitive(bool(self.recorder) or (self.ready and not self.busy))
@@ -1011,6 +1050,7 @@ class PurrApplication(Gtk.Application):
             self.stream_typed = ""
             self.stream_raw = ""
             self.stream_external_drops = 0
+            self.heard_sound = self.silence_warned = False
             self._show_overlay()
             if self.server.streaming:
                 stream = self.server.begin_stream()
@@ -1034,7 +1074,7 @@ class PurrApplication(Gtk.Application):
                     ],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-            self._set_status(f"Listening… tap {self._shortcut_text()} again to finish")
+            self._set_status(self._listening_status())
             if self.indicator:
                 self.indicator.set_icon_full("media-record-symbolic", "Purr is listening")
             self._sync_record_controls()
@@ -1091,8 +1131,10 @@ class PurrApplication(Gtk.Application):
                     samples.byteswap()
                 total_samples += len(samples)
                 if samples:
-                    peak = max(peak, max(abs(sample) for sample in samples))
+                    chunk_peak = max(abs(sample) for sample in samples)
+                    peak = max(peak, chunk_peak)
                     sum_squares += sum(sample * sample for sample in samples)
+                    GLib.idle_add(self._hear, recorder, chunk_peak, total_samples / 16000)
                 result = stream.feed_s16(pcm)
                 raw_text += result.get("text", "")
                 if result.get("text") or result.get("eou") or result.get("eob"):
@@ -1121,6 +1163,39 @@ class PurrApplication(Gtk.Application):
             duration, peak_db, rms_db, self._loggable(raw_text),
         )
         GLib.idle_add(self._stream_finished, raw_text, duration, peak_db, error)
+
+    def _hear(self, recorder, chunk_peak: int, seconds: float) -> bool:
+        """Show the level, and warn early when the microphone gives only silence."""
+        if recorder is not self.recorder:
+            return False  # a late chunk from a dictation that already ended
+        level_db = 20 * math.log10(chunk_peak / 32768) if chunk_peak else -120.0
+        if self.level_bar:
+            self.level_bar.set_value(min(1.0, max(0.0, (level_db + 60) / 60)))
+        if level_db >= SILENCE_DB:
+            self.heard_sound = True
+            if self.silence_warned:
+                self.silence_warned = False
+                self._set_status(self._listening_status())
+        elif not self.heard_sound and not self.silence_warned and seconds >= SILENCE_WARNING_SECONDS:
+            self.silence_warned = True
+            name = self._recording_microphone_name()
+            message = f"Purr hears only silence from {name} — check that it is connected and unmuted"
+            self._set_status(message, True)
+            self._notify("Purr hears nothing", message)
+        return False
+
+    def _recording_microphone_name(self) -> str:
+        selected = str(self.config.get("microphone", "default"))
+        microphones = dict(list_microphones())
+        if selected in microphones:
+            return microphones[selected]
+        try:
+            source = subprocess.run(
+                ["pactl", "get-default-source"], capture_output=True, text=True, timeout=2, check=True,
+            ).stdout.strip()
+        except Exception:
+            source = ""
+        return microphones.get(source, "the microphone")
 
     def _loggable(self, text: str) -> str:
         """Dictated words stay out of the log unless log_transcripts is on."""
@@ -1188,7 +1263,7 @@ class PurrApplication(Gtk.Application):
             return self._complete("", 0, error)
         if duration < 0.20:
             return self._complete("", 0, "Too short — speak for a moment before stopping")
-        if peak_db < -55:
+        if peak_db < SILENCE_DB:
             if self.stream_typed and self.keyboard:
                 self.keyboard.backspace(len(self.stream_typed))
             return self._complete("", 0, "No speech detected")
@@ -1212,7 +1287,7 @@ class PurrApplication(Gtk.Application):
                 return
             peak_db, rms_db = normalize_wav(path)
             LOG.info("Captured %.2fs, peak %.1f dBFS, RMS %.1f dBFS", duration, peak_db, rms_db)
-            if peak_db < -55:
+            if peak_db < SILENCE_DB:
                 GLib.idle_add(self._complete, "", 0, "No speech detected")
                 return
             raw = self.server.transcribe(path, multipart_body)
@@ -1390,6 +1465,94 @@ class PurrApplication(Gtk.Application):
             if selected in self.microphone_labels:
                 self.config["microphone_label"] = self.microphone_labels[selected]
             save_config(self.config)
+
+    def _show_replacements_summary(self) -> None:
+        if not self.replacements_summary:
+            return
+        dictionary = self.config.get("dictionary") or {}
+        count = len(dictionary) if isinstance(dictionary, dict) else 0
+        self.replacements_summary.set_text(
+            "None yet — fix names and jargon Purr mishears" if not count
+            else "1 replacement" if count == 1 else f"{count} replacements"
+        )
+
+    def _edit_replacements(self, _button) -> None:
+        dialog = self._build_replacements_dialog()
+        dialog.connect("response", lambda dialog, _response: dialog.destroy())
+        dialog.show_all()
+
+    def _build_replacements_dialog(self) -> Gtk.Dialog:
+        dialog = Gtk.Dialog(
+            title="Replacements", transient_for=self.window, modal=True, use_header_bar=True,
+        )
+        dialog.set_default_size(560, 440)
+        content = dialog.get_content_area()
+        content.set_spacing(12)
+        content.set_border_width(16)
+        intro = Gtk.Label(
+            label="When Purr hears the words on the left, it types the text on the right. "
+            "Matching ignores case and whole words only — for example, “type script” → “TypeScript”.",
+            xalign=0, wrap=True, max_width_chars=60,
+        )
+        intro.get_style_context().add_class("dim-label")
+        content.pack_start(intro, False, False, 0)
+        table = Gtk.Grid(column_spacing=8, row_spacing=8)
+        for column, title in enumerate(("When I say", "Type")):
+            heading = Gtk.Label(label=title, xalign=0)
+            heading.get_style_context().add_class("purr-card-title")
+            table.attach(heading, column, 0, 1, 1)
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll.add(table)
+        content.pack_start(scroll, True, True, 0)
+        rows = []
+
+        def save(*_args):
+            self._save_replacements((spoken.get_text(), typed.get_text()) for spoken, typed, _ in rows)
+
+        def add_row(spoken_text: str = "", typed_text: str = "") -> Gtk.Entry:
+            spoken = Gtk.Entry(text=spoken_text, placeholder_text="spoken words", hexpand=True)
+            typed = Gtk.Entry(text=typed_text, placeholder_text="text to type", hexpand=True)
+            remove = Gtk.Button.new_from_icon_name("edit-delete-symbolic", Gtk.IconSize.BUTTON)
+            remove.set_relief(Gtk.ReliefStyle.NONE)
+            remove.set_tooltip_text("Remove this replacement")
+            row = (spoken, typed, remove)
+            line = len(rows) + 1
+            for column, widget in enumerate(row):
+                table.attach(widget, column, line, 1, 1)
+                widget.show()
+            for entry in (spoken, typed):
+                entry.connect("changed", save)
+
+            def remove_row(_button):
+                table.remove_row(table.child_get_property(spoken, "top-attach"))
+                rows.remove(row)
+                save()
+
+            remove.connect("clicked", remove_row)
+            rows.append(row)
+            return spoken
+
+        dictionary = self.config.get("dictionary") or {}
+        if isinstance(dictionary, dict):
+            for spoken_text, typed_text in dictionary.items():
+                add_row(str(spoken_text), str(typed_text))
+        add = Gtk.Button(label="Add Replacement", halign=Gtk.Align.START)
+        add.connect("clicked", lambda _button: add_row().grab_focus())
+        content.pack_start(add, False, False, 0)
+        # Never open with an existing replacement focused and selected, where
+        # the first keystroke would overwrite it.
+        dialog.set_focus(add_row() if not rows else add)
+        dialog.replacement_rows, dialog.add_replacement = rows, add_row
+        return dialog
+
+    def _save_replacements(self, pairs) -> None:
+        """Apply the editor's rows at once. A half-filled row is a draft: saving
+        it would make Purr delete the spoken words while the user is typing."""
+        self.config["dictionary"] = {
+            spoken.strip(): typed for spoken, typed in pairs if spoken.strip() and typed.strip()
+        }
+        save_config(self.config)
+        self._show_replacements_summary()
 
     def _fillers_changed(self, button) -> None:
         self.config["trim_fillers"] = button.get_active()

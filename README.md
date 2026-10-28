@@ -147,10 +147,12 @@ GUI can download, select, and remove these additional local models:
 - Whisper Large V3 Turbo (broad-language compatibility fallback)
 
 Purr starts automatically on sign-in and keeps running in the top bar when its
-window is closed. The window includes a practice box for trying dictation, plus
-switches for voice commands and filler-word removal. See [the Linux guide](LINUX.md) for prerequisites, model
-sizes, settings, local files, update/uninstall steps, architecture, and common
-failure modes.
+window is closed. The window includes a practice box for trying dictation, a
+live microphone level meter, a replacements editor for names and jargon, and
+switches for voice commands and filler-word removal. If the microphone hears
+only silence, Purr warns within seconds instead of after you stop. See
+[the Linux guide](LINUX.md) for prerequisites, model sizes, settings, local
+files, update/uninstall steps, architecture, and common failure modes.
 
 ## FAQs
 

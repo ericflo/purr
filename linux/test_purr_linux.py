@@ -467,6 +467,70 @@ class LinuxIntegrationTests(unittest.TestCase):
             app._stream_finished("diagnose this", 3.0, -3.0, None)
         self.assertIn("diagnose this", "\n".join(logs.output))
 
+    def test_silent_microphone_is_flagged_within_seconds_and_clears_on_sound(self):
+        app = windowed_app()
+        app.config["microphone"] = "usb.yeti"
+        app.recorder = recorder = mock.Mock()
+        app._sync_record_controls()
+        self.assertTrue(app.level_meter.get_visible())
+        self.assertTrue(all(part.get_visible() for part in app.level_meter.get_children()))
+        with mock.patch.object(purr_linux, "list_microphones", return_value=[("usb.yeti", "Yeti")]):
+            app._hear(recorder, 0, 1.0)
+            self.assertEqual(app.notifications, [])
+            app._hear(recorder, 0, purr_linux.SILENCE_WARNING_SECONDS)
+            app._hear(recorder, 0, purr_linux.SILENCE_WARNING_SECONDS + 0.2)
+        self.assertTrue(app.status_error)
+        self.assertIn("silence from Yeti", app.status_text)
+        self.assertEqual(len(app.notifications), 1)
+        app._hear(recorder, 8000, 3.6)
+        self.assertFalse(app.status_error)
+        self.assertTrue(app.status_text.startswith("Listening"))
+        self.assertGreater(app.level_bar.get_value(), 0.5)
+        # Pausing after speech is normal and never warns.
+        app._hear(recorder, 0, 30.0)
+        self.assertFalse(app.status_error)
+        # Chunks from a dictation that already ended change nothing.
+        app._hear(mock.Mock(), 0, 99.0)
+        self.assertEqual(len(app.notifications), 1)
+        app.recorder = None
+        app._sync_record_controls()
+        self.assertFalse(app.level_meter.get_visible())
+
+    def test_empty_replacements_editor_opens_ready_to_type(self):
+        app = windowed_app()
+        app.config["dictionary"] = {}
+        app._show_replacements_summary()
+        self.assertIn("None yet", app.replacements_summary.get_text())
+        dialog = app._build_replacements_dialog()
+        self.assertEqual(len(dialog.replacement_rows), 1)
+        self.assertIs(dialog.get_focus(), dialog.replacement_rows[0][0])
+        self.assertEqual(app.config["dictionary"], {})
+        dialog.destroy()
+
+    def test_replacements_are_edited_in_the_window_and_apply_at_once(self):
+        app = windowed_app()
+        app.config["dictionary"] = {"purr": "Purr"}
+        app._show_replacements_summary()
+        self.assertEqual(app.replacements_summary.get_text(), "1 replacement")
+        dialog = app._build_replacements_dialog()
+        rows = dialog.replacement_rows
+        self.assertEqual([(s.get_text(), t.get_text()) for s, t, _ in rows], [("purr", "Purr")])
+        self.assertIsInstance(dialog.get_focus(), Gtk.Button)  # not the existing entry
+        dialog.add_replacement().set_text(" type script ")
+        # Half-filled: Purr must not start deleting "type script" yet.
+        self.assertEqual(app.processor.apply("use type script")[0], "use type script")
+        rows[-1][1].set_text("TypeScript")
+        self.assertEqual(app.processor.apply("use type script")[0], "use TypeScript")
+        self.assertEqual(app.replacements_summary.get_text(), "2 replacements")
+        saved = json.loads(purr_linux.CONFIG_FILE.read_text())["dictionary"]
+        self.assertEqual(saved, {"purr": "Purr", "type script": "TypeScript"})
+        rows[0][2].clicked()  # the first row's delete button
+        self.assertEqual(app.config["dictionary"], {"type script": "TypeScript"})
+        self.assertEqual(len(rows), 1)
+        # Rows below a removed one move up, keeping the table compact.
+        self.assertEqual(rows[0][0].get_parent().child_get_property(rows[0][0], "top-attach"), 1)
+        dialog.destroy()
+
     def test_tests_never_touch_the_real_log_or_config(self):
         self.assertTrue(str(purr_linux.STATE).startswith(SANDBOX))
         self.assertTrue(str(purr_linux.CONFIG_FILE).startswith(SANDBOX))
