@@ -27,7 +27,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("AyatanaAppIndicator3", "0.1")
 from gi.repository import AyatanaAppIndicator3 as AppIndicator
-from gi.repository import Gdk, Gio, GLib, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
 from purr_models import (
     DEFAULT_MODEL_ID,
@@ -495,9 +495,10 @@ class PurrApplication(Gtk.Application):
         self.shortcut_guard = 0
         self.shortcut_pressed_at = 0.0
         self.window = self.overlay = None
-        self.status_label = self.last_label = self.overlay_label = None
+        self.status_label = self.practice = self.overlay_label = None
         self.record_button = self.model_combo = self.model_action = None
         self.microphone_combo = None
+        self.microphone_labels: dict[str, str] = {}
         self.model_remove = self.model_description = self.download_progress = None
         self.indicator = self.indicator_status = self.indicator_model = None
         self.indicator_dictate = None
@@ -529,9 +530,7 @@ class PurrApplication(Gtk.Application):
             # mapped Wayland toplevel takes focus away from the dictation target.
             self.background = False
             return
-        if not self.window:
-            self._build_window()
-        self.window.present()
+        self._show_window()
 
     @staticmethod
     def _install_css() -> None:
@@ -542,6 +541,7 @@ class PurrApplication(Gtk.Application):
             .purr-live label { color: white; font-size: 17px; }
             .purr-record { padding: 10px 22px; font-weight: bold; }
             .purr-model-title { font-weight: bold; font-size: 15px; }
+            .purr-status { font-weight: bold; }
         """)
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -594,21 +594,34 @@ class PurrApplication(Gtk.Application):
         # the current status instead of a stale placeholder.
         self.status_label = Gtk.Label(label=self.status_text, xalign=0)
         self.status_label.set_line_wrap(True)
+        self.status_label.get_style_context().add_class("purr-status")
         status_card.pack_start(self.status_label, False, False, 0)
-        self.last_label = Gtk.Label(
-            label="Your live transcript will appear here while you speak.", xalign=0
+        # Dictation started from this window types here. A real text field
+        # gives the typed keys a home and keeps focus off the buttons, where a
+        # typed space or Enter would press them.
+        self.practice = Gtk.TextView(
+            wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=10, right_margin=10,
+            top_margin=8, bottom_margin=8,
         )
-        self.last_label.set_line_wrap(True)
-        self.last_label.set_selectable(True)
-        self.last_label.get_style_context().add_class("dim-label")
-        status_card.pack_start(self.last_label, True, True, 0)
+        practice_scroll = Gtk.ScrolledWindow(min_content_height=110)
+        practice_scroll.set_shadow_type(Gtk.ShadowType.IN)
+        practice_scroll.add(self.practice)
+        status_card.pack_start(practice_scroll, True, True, 0)
+        hint = Gtk.Label(
+            label="Try it here: Start Dictation types into this box. "
+            "In other apps, use the shortcut.",
+            xalign=0,
+        )
+        hint.set_line_wrap(True)
+        hint.get_style_context().add_class("dim-label")
+        status_card.pack_start(hint, False, False, 0)
         buttons = Gtk.Box(spacing=10)
-        self.record_button = Gtk.Button(label="Start Dictation")
+        self.record_button = Gtk.Button(label="Start Dictation", focus_on_click=False)
         self.record_button.get_style_context().add_class("suggested-action")
         self.record_button.get_style_context().add_class("purr-record")
-        self.record_button.connect("clicked", self._toggle_recording)
+        self.record_button.connect("clicked", self._record_button_clicked)
         buttons.pack_start(self.record_button, True, True, 0)
-        shortcut_button = Gtk.Button(label="Shortcut…")
+        shortcut_button = Gtk.Button(label="Shortcut…", focus_on_click=False)
         shortcut_button.connect(
             "clicked", lambda _button: self.shortcuts and self.shortcuts.configure()
         )
@@ -655,33 +668,26 @@ class PurrApplication(Gtk.Application):
             language.append(code, name)
         language.set_active_id(str(self.config.get("language", "en")))
         language.connect("changed", self._language_changed)
+        language.set_hexpand(True)
         options.attach(language, 1, 0, 1, 1)
         microphone_label = Gtk.Label(label="Microphone", xalign=0)
         options.attach(microphone_label, 0, 1, 1, 1)
         self.microphone_combo = Gtk.ComboBoxText()
-        microphones = list_microphones()
-        try:
-            current_default = subprocess.run(
-                ["pactl", "get-default-source"], capture_output=True, text=True,
-                timeout=2, check=True,
-            ).stdout.strip()
-        except Exception:
-            current_default = ""
-        default_label = next(
-            (label for name, label in microphones if name == current_default), "system choice"
-        )
-        self.microphone_combo.append("default", f"System default — {default_label}")
-        for name, label in microphones:
-            self.microphone_combo.append(name, label)
-        selected_microphone = str(self.config.get("microphone", "default"))
-        if not self.microphone_combo.set_active_id(selected_microphone):
-            self.microphone_combo.set_active_id("default")
+        for cell in self.microphone_combo.get_cells():
+            # Long device names must not widen the whole window.
+            cell.set_property("ellipsize", Pango.EllipsizeMode.END)
         self.microphone_combo.connect("changed", self._microphone_changed)
+        self._populate_microphones()
+        self.microphone_combo.set_hexpand(True)
         options.attach(self.microphone_combo, 1, 1, 1, 1)
         commands = Gtk.CheckButton(label='Enable voice commands, including “scratch that”')
         commands.set_active(bool(self.config.get("voice_commands", True)))
         commands.connect("toggled", self._commands_changed)
         options.attach(commands, 0, 2, 2, 1)
+        fillers = Gtk.CheckButton(label="Remove filler words such as “um” and “uh”")
+        fillers.set_active(bool(self.config.get("trim_fillers", True)))
+        fillers.connect("toggled", self._fillers_changed)
+        options.attach(fillers, 0, 3, 2, 1)
         outer.pack_start(options, False, False, 0)
 
         note = Gtk.Label(
@@ -693,8 +699,46 @@ class PurrApplication(Gtk.Application):
         self.window.add(outer)
         self.window.show_all()
         self.download_progress.hide()
+        self.practice.grab_focus()
         self._sync_record_controls()
         self._refresh_model_ui()
+
+    def _populate_microphones(self) -> None:
+        """(Re)list sources, so devices plugged in since the last look appear."""
+        combo = self.microphone_combo
+        microphones = list_microphones()
+        try:
+            current_default = subprocess.run(
+                ["pactl", "get-default-source"], capture_output=True, text=True,
+                timeout=2, check=True,
+            ).stdout.strip()
+        except Exception:
+            current_default = ""
+        default_label = next(
+            (label for name, label in microphones if name == current_default), "system choice"
+        )
+        selected = str(self.config.get("microphone", "default"))
+        self.microphone_labels = dict(microphones)
+        label = self.microphone_labels.get(selected)
+        if label and label != self.config.get("microphone_label"):
+            # Keep the remembered name current, so an unplugged choice is shown by name.
+            self.config["microphone_label"] = label
+            save_config(self.config)
+        # Repopulating emits "changed"; it must not rewrite the saved choice.
+        combo.handler_block_by_func(self._microphone_changed)
+        try:
+            combo.remove_all()
+            combo.append("default", f"System default — {default_label}")
+            for name, label in microphones:
+                combo.append(name, label)
+            if selected != "default" and selected not in {name for name, _ in microphones}:
+                # Keep an unplugged choice visible instead of silently replacing it;
+                # recording falls back to the system default until it returns.
+                label = str(self.config.get("microphone_label") or "Selected microphone")
+                combo.append(selected, f"{label} (not connected)")
+            combo.set_active_id(selected)
+        finally:
+            combo.handler_unblock_by_func(self._microphone_changed)
 
     def _build_overlay(self) -> None:
         self.overlay = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
@@ -739,7 +783,17 @@ class PurrApplication(Gtk.Application):
     def _show_window(self) -> None:
         if not self.window:
             self._build_window()
+        else:
+            self._populate_microphones()
         self.window.present()
+
+    def _record_button_clicked(self, _button) -> None:
+        if not self.recorder and self.practice:
+            # Dictation started here types into the practice area.
+            self.practice.grab_focus()
+            buffer = self.practice.get_buffer()
+            buffer.place_cursor(buffer.get_end_iter())
+        self._toggle_recording(None)
 
     def _toggle_recording(self, _button) -> None:
         self.stop_recording() if self.recorder else self.start_recording()
@@ -782,6 +836,17 @@ class PurrApplication(Gtk.Application):
             icon = "dialog-error-symbolic" if error else "audio-input-microphone-symbolic"
             self.indicator.set_icon_full(icon, text)
         return False
+
+    def _flash_status(self, text: str, milliseconds: int = 4000) -> None:
+        """Show a passing remark, then return to Ready unless something else happened."""
+        self._set_status(text)
+
+        def restore():
+            if self.status_text == text and self.ready and not self.busy and not self.recorder:
+                self._show_ready()
+            return False
+
+        GLib.timeout_add(milliseconds, restore)
 
     def _sync_record_controls(self) -> None:
         label = "Stop Dictation" if self.recorder else "Start Dictation"
@@ -1009,8 +1074,6 @@ class PurrApplication(Gtk.Application):
         preview = transcript_preview(text) or ("End of utterance…" if eou else "Listening…")
         if self.overlay_label:
             self.overlay_label.set_text(preview)
-        if self.last_label:
-            self.last_label.set_text(transcript_preview(text) or "Listening…")
         if not self.shortcut_down:
             self._apply_stream_typing(text, drop_previous)
         return False
@@ -1066,8 +1129,6 @@ class PurrApplication(Gtk.Application):
         if text and self.keyboard and not text.endswith("\n"):
             self.keyboard.type_text(" ")
         self._complete("", 0, None)
-        if self.last_label and text:
-            self.last_label.set_text(transcript_preview(text))
         GLib.timeout_add(700, self._hide_overlay)
         return False
 
@@ -1108,8 +1169,10 @@ class PurrApplication(Gtk.Application):
         self._sync_record_controls()
         if message:
             self._hide_overlay()
-            self._set_status(message, message.startswith(("No microphone", "Transcription", "Could not")))
-            if message not in ("No speech detected", "Too short — speak for a moment before stopping"):
+            if message in ("No speech detected", "Too short — speak for a moment before stopping"):
+                self._flash_status(message)
+            else:
+                self._set_status(message, message.startswith(("No microphone", "Transcription", "Could not")))
                 self._notify("Purr dictation failed", message)
             return False
         if drop_previous and self.keyboard:
@@ -1118,8 +1181,6 @@ class PurrApplication(Gtk.Application):
             insertion = text if text.endswith(("\n", "\t", " ")) else text + " "
             if self.keyboard:
                 self.keyboard.type_text(insertion)
-            if self.last_label:
-                self.last_label.set_text(transcript_preview(text))
         self._show_ready()
         return False
 
@@ -1232,7 +1293,7 @@ class PurrApplication(Gtk.Application):
         selected = self._selected_model()
         try:
             self.store.remove(selected)
-            self._set_status(f"Removed {selected.name}")
+            self._flash_status(f"Removed {selected.name}")
         except Exception as error:
             self._set_status(str(error), True)
         self._populate_model_combo(selected.id)
@@ -1244,9 +1305,18 @@ class PurrApplication(Gtk.Application):
             save_config(self.config)
 
     def _microphone_changed(self, combo) -> None:
-        if combo.get_active_id():
-            self.config["microphone"] = combo.get_active_id()
+        selected = combo.get_active_id()
+        if selected:
+            self.config["microphone"] = selected
+            # Remembered so an unplugged choice can still be shown by name. The
+            # "(not connected)" entry itself is not a name worth remembering.
+            if selected in self.microphone_labels:
+                self.config["microphone_label"] = self.microphone_labels[selected]
             save_config(self.config)
+
+    def _fillers_changed(self, button) -> None:
+        self.config["trim_fillers"] = button.get_active()
+        save_config(self.config)
 
     def _commands_changed(self, button) -> None:
         self.config["voice_commands"] = button.get_active()

@@ -123,10 +123,19 @@ still finishing, or the engine failed), the tap shows a notification explaining
 why instead of doing nothing. The top-bar menu's **Start Dictation** item
 switches to **Stop Dictation** while Purr is listening.
 
+The Purr window has a practice box: **Start Dictation** in the window types
+into it, so you can try dictation, voice commands, and microphones without
+touching another app.
+
 Click **Shortcut…** in Purr to open GNOME's keyboard settings. Purr preserves a
 shortcut changed there and shows the new one immediately. All text is typed
 through Purr's virtual keyboard; Purr never reads or writes the clipboard.
 Optional model downloads continue in the background while you dictate.
+
+The microphone list refreshes each time the window opens, so newly connected
+devices appear without restarting Purr. A chosen microphone that is unplugged
+stays selected (marked “not connected”) and Purr records from the system
+default until it returns.
 
 Spoken commands include “new paragraph,” “new line,” punctuation names, and
 “scratch that.” The last command removes the preceding dictated word, including
@@ -188,6 +197,7 @@ The GUI writes `~/.config/purr/config.json`. Supported keys are:
 - `model`: a model ID from `linux/purr_models.py`
 - `language`: recognition language code or `auto`
 - `microphone`: PipeWire/Pulse source name or `default`
+- `microphone_label`: friendly name of that source, shown while it is unplugged
 - `trim_fillers`: remove common fillers such as “um” and “uh”
 - `voice_commands`: enable spoken punctuation and “scratch that”
 - `dictionary`: JSON object mapping spoken forms to replacements

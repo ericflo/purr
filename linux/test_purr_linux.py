@@ -20,6 +20,7 @@ os.environ["XDG_CONFIG_HOME"] = os.path.join(SANDBOX, "config")
 from gi.repository import GLib
 
 import purr_linux
+from purr_linux import Gtk
 from purr_linux import (
     PostProcessor,
     PurrApplication,
@@ -250,6 +251,57 @@ class LinuxIntegrationTests(unittest.TestCase):
         app._server_ready()
         self.assertIn("uinput", app.status_text)
         self.assertTrue(app.status_error)
+
+    def test_passing_remarks_return_to_ready(self):
+        app = live_app(ScreenKeyboard())
+        app._shortcut_changed("<Control><Alt>space")
+        app._flash_status("No speech detected", 50)
+        self.assertEqual(app.status_text, "No speech detected")
+        run_main_loop(0.2)
+        self.assertTrue(app.status_text.startswith("Ready — tap Ctrl+Alt+Space"))
+
+    def test_passing_remark_never_hides_a_newer_status(self):
+        app = live_app(ScreenKeyboard())
+        app._flash_status("Removed a model", 50)
+        app._set_status("Listening…")
+        run_main_loop(0.2)
+        self.assertEqual(app.status_text, "Listening…")
+
+    def test_filler_toggle_applies_to_the_next_words(self):
+        app = live_app(ScreenKeyboard())
+        self.assertEqual(app.processor.apply("um hello")[0], "hello")
+        app._fillers_changed(mock.Mock(get_active=lambda: False))
+        self.assertEqual(app.processor.apply("um hello")[0], "um hello")
+        self.assertFalse(json.loads(purr_linux.CONFIG_FILE.read_text())["trim_fillers"])
+
+    def test_unplugged_microphone_stays_selected_by_name(self):
+        app = live_app(ScreenKeyboard())
+        app.microphone_combo = Gtk.ComboBoxText()
+        app.microphone_combo.connect("changed", app._microphone_changed)
+        yeti = ("alsa_input.usb-yeti", "Yeti Stereo Microphone")
+
+        def populate(microphones):
+            with mock.patch.object(purr_linux, "list_microphones", return_value=microphones), \
+                    mock.patch.object(purr_linux.subprocess, "run", side_effect=OSError):
+                app._populate_microphones()
+
+        populate([yeti])
+        app.microphone_combo.set_active_id(yeti[0])
+        populate([])
+        self.assertEqual(app.microphone_combo.get_active_id(), yeti[0])
+        self.assertEqual(
+            app.microphone_combo.get_active_text(), "Yeti Stereo Microphone (not connected)"
+        )
+        # Re-choosing the unplugged entry must not remember the suffix as its name.
+        app.microphone_combo.set_active_id("default")
+        app.microphone_combo.set_active_id(yeti[0])
+        populate([])
+        self.assertEqual(
+            app.microphone_combo.get_active_text(), "Yeti Stereo Microphone (not connected)"
+        )
+        saved = json.loads(purr_linux.CONFIG_FILE.read_text())
+        self.assertEqual(saved["microphone"], yeti[0])
+        self.assertEqual(saved["microphone_label"], "Yeti Stereo Microphone")
 
     def test_tests_never_touch_the_real_log_or_config(self):
         self.assertTrue(str(purr_linux.STATE).startswith(SANDBOX))
