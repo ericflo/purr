@@ -76,6 +76,7 @@ DEFAULT_CONFIG = {
     "voice_commands": True,
     "dictionary": {},
     "initial_prompt": "",
+    "log_transcripts": False,
 }
 
 
@@ -495,11 +496,13 @@ class PurrApplication(Gtk.Application):
         self.shortcut_guard = 0
         self.shortcut_pressed_at = 0.0
         self.window = self.overlay = None
-        self.status_label = self.practice = self.overlay_label = None
+        self.status_label = self.status_icon = self.status_spinner = None
+        self.practice = self.practice_placeholder = self.overlay_label = None
         self.record_button = self.model_combo = self.model_action = None
         self.microphone_combo = None
         self.microphone_labels: dict[str, str] = {}
         self.model_remove = self.model_description = self.download_progress = None
+        self.model_buttons = self.model_state = None
         self.indicator = self.indicator_status = self.indicator_model = None
         self.indicator_dictate = None
 
@@ -540,8 +543,12 @@ class PurrApplication(Gtk.Application):
             .purr-live { background: rgba(24, 24, 28, 0.94); color: white; border-radius: 18px; padding: 18px 24px; }
             .purr-live label { color: white; font-size: 17px; }
             .purr-record { padding: 10px 22px; font-weight: bold; }
-            .purr-model-title { font-weight: bold; font-size: 15px; }
+            .purr-card-title { font-weight: bold; font-size: 15px; }
             .purr-status { font-weight: bold; }
+            .purr-ready { color: @success_color; }
+            .purr-listening { color: #e5484d; }
+            .purr-error { color: @error_color; }
+            .purr-in-use { color: @success_color; font-weight: bold; }
         """)
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -590,12 +597,19 @@ class PurrApplication(Gtk.Application):
 
         status_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         status_card.get_style_context().add_class("purr-card")
+        status_row = Gtk.Box(spacing=10)
+        self.status_icon = Gtk.Image()
+        self.status_spinner = Gtk.Spinner()
+        for indicator in (self.status_icon, self.status_spinner):
+            indicator.set_no_show_all(True)
+            status_row.pack_start(indicator, False, False, 0)
         # The window may be built long after startup (autostart), so begin from
         # the current status instead of a stale placeholder.
         self.status_label = Gtk.Label(label=self.status_text, xalign=0)
         self.status_label.set_line_wrap(True)
         self.status_label.get_style_context().add_class("purr-status")
-        status_card.pack_start(self.status_label, False, False, 0)
+        status_row.pack_start(self.status_label, True, True, 0)
+        status_card.pack_start(status_row, False, False, 0)
         # Dictation started from this window types here. A real text field
         # gives the typed keys a home and keeps focus off the buttons, where a
         # typed space or Enter would press them.
@@ -606,15 +620,20 @@ class PurrApplication(Gtk.Application):
         practice_scroll = Gtk.ScrolledWindow(min_content_height=110)
         practice_scroll.set_shadow_type(Gtk.ShadowType.IN)
         practice_scroll.add(self.practice)
-        status_card.pack_start(practice_scroll, True, True, 0)
-        hint = Gtk.Label(
-            label="Try it here: Start Dictation types into this box. "
-            "In other apps, use the shortcut.",
-            xalign=0,
+        practice_area = Gtk.Overlay()
+        practice_area.add(practice_scroll)
+        self.practice_placeholder = Gtk.Label(
+            label="Try Purr here: Start Dictation types into this box.\n"
+            "In any other app, use the shortcut.",
+            xalign=0, yalign=0, margin_start=12, margin_top=9,
         )
-        hint.set_line_wrap(True)
-        hint.get_style_context().add_class("dim-label")
-        status_card.pack_start(hint, False, False, 0)
+        self.practice_placeholder.get_style_context().add_class("dim-label")
+        practice_area.add_overlay(self.practice_placeholder)
+        practice_area.set_overlay_pass_through(self.practice_placeholder, True)
+        self.practice.get_buffer().connect(
+            "changed", lambda buffer: self.practice_placeholder.set_visible(not buffer.get_char_count())
+        )
+        status_card.pack_start(practice_area, True, True, 0)
         buttons = Gtk.Box(spacing=10)
         self.record_button = Gtk.Button(label="Start Dictation", focus_on_click=False)
         self.record_button.get_style_context().add_class("suggested-action")
@@ -632,7 +651,7 @@ class PurrApplication(Gtk.Application):
         model_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         model_card.get_style_context().add_class("purr-card")
         model_title = Gtk.Label(label="Transcription model", xalign=0)
-        model_title.get_style_context().add_class("purr-model-title")
+        model_title.get_style_context().add_class("purr-card-title")
         model_card.pack_start(model_title, False, False, 0)
         self.model_combo = Gtk.ComboBoxText()
         self._populate_model_combo(self.model.id)
@@ -642,21 +661,30 @@ class PurrApplication(Gtk.Application):
         self.model_description.set_line_wrap(True)
         self.model_description.get_style_context().add_class("dim-label")
         model_card.pack_start(self.model_description, False, False, 0)
-        model_buttons = Gtk.Box(spacing=8)
+        self.model_state = Gtk.Label(xalign=0)
+        self.model_state.get_style_context().add_class("purr-in-use")
+        self.model_state.set_no_show_all(True)
+        model_card.pack_start(self.model_state, False, False, 0)
+        self.model_buttons = Gtk.Box(spacing=8)
+        self.model_buttons.set_no_show_all(True)
         self.model_action = Gtk.Button()
         self.model_action.connect("clicked", self._model_action_clicked)
-        model_buttons.pack_start(self.model_action, True, True, 0)
+        self.model_buttons.pack_start(self.model_action, True, True, 0)
         self.model_remove = Gtk.Button(label="Remove")
         self.model_remove.connect("clicked", self._remove_model_clicked)
-        model_buttons.pack_start(self.model_remove, False, False, 0)
-        model_card.pack_start(model_buttons, False, False, 0)
+        self.model_buttons.pack_start(self.model_remove, False, False, 0)
+        model_card.pack_start(self.model_buttons, False, False, 0)
         self.download_progress = Gtk.ProgressBar(show_text=True)
         self.download_progress.set_no_show_all(True)
         model_card.pack_start(self.download_progress, False, False, 0)
         outer.pack_start(model_card, False, False, 0)
 
+        settings_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        settings_card.get_style_context().add_class("purr-card")
+        settings_title = Gtk.Label(label="Dictation", xalign=0)
+        settings_title.get_style_context().add_class("purr-card-title")
+        settings_card.pack_start(settings_title, False, False, 0)
         options = Gtk.Grid(column_spacing=14, row_spacing=10)
-        options.set_border_width(4)
         language_label = Gtk.Label(label="Recognition language", xalign=0)
         options.attach(language_label, 0, 0, 1, 1)
         language = Gtk.ComboBoxText()
@@ -688,7 +716,8 @@ class PurrApplication(Gtk.Application):
         fillers.set_active(bool(self.config.get("trim_fillers", True)))
         fillers.connect("toggled", self._fillers_changed)
         options.attach(fillers, 0, 3, 2, 1)
-        outer.pack_start(options, False, False, 0)
+        settings_card.pack_start(options, False, False, 0)
+        outer.pack_start(settings_card, False, False, 0)
 
         note = Gtk.Label(
             label="Purr starts when you sign in. Closing this window leaves it in the top bar.",
@@ -700,6 +729,7 @@ class PurrApplication(Gtk.Application):
         self.window.show_all()
         self.download_progress.hide()
         self.practice.grab_focus()
+        self._show_status_state()
         self._sync_record_controls()
         self._refresh_model_ui()
 
@@ -830,12 +860,33 @@ class PurrApplication(Gtk.Application):
         self.status_text, self.status_error = text, error
         if self.status_label:
             self.status_label.set_text(text)
+            self._show_status_state()
         if self.indicator_status:
             self.indicator_status.set_label(text[:100])
         if self.indicator:
             icon = "dialog-error-symbolic" if error else "audio-input-microphone-symbolic"
             self.indicator.set_icon_full(icon, text)
         return False
+
+    def _show_status_state(self) -> None:
+        """Pair the status text with a glance-able state: ready, listening, working, or error."""
+        if not self.status_label:
+            return
+        working = not self.status_error and not self.recorder and (self.busy or not self.ready)
+        self.status_spinner.set_visible(working)
+        self.status_spinner.start() if working else self.status_spinner.stop()
+        self.status_icon.set_visible(not working)
+        if self.status_error:
+            state, icon = "purr-error", "dialog-error-symbolic"
+        elif self.recorder:
+            state, icon = "purr-listening", "media-record-symbolic"
+        else:
+            state, icon = "purr-ready", "object-select-symbolic"
+        self.status_icon.set_from_icon_name(icon, Gtk.IconSize.LARGE_TOOLBAR)
+        style = self.status_icon.get_style_context()
+        for name in ("purr-error", "purr-listening", "purr-ready"):
+            style.remove_class(name)
+        style.add_class(state)
 
     def _flash_status(self, text: str, milliseconds: int = 4000) -> None:
         """Show a passing remark, then return to Ready unless something else happened."""
@@ -853,6 +904,9 @@ class PurrApplication(Gtk.Application):
         if self.record_button:
             self.record_button.set_label(label)
             self.record_button.set_sensitive(bool(self.recorder) or (self.ready and not self.busy))
+            style = self.record_button.get_style_context()
+            style.remove_class("destructive-action" if not self.recorder else "suggested-action")
+            style.add_class("destructive-action" if self.recorder else "suggested-action")
         if self.indicator_dictate:
             self.indicator_dictate.set_label(label)
         # Switching engines mid-dictation is refused, so reflect that in the UI.
@@ -870,8 +924,8 @@ class PurrApplication(Gtk.Application):
 
     def _ready_status(self) -> str:
         if not self.shortcut_description:
-            return f"Ready — set a shortcut with Shortcut…  ·  {self.server.backend_label}"
-        return f"Ready — tap {self.shortcut_description} to dictate  ·  {self.server.backend_label}"
+            return "Ready — set a shortcut with Shortcut…"
+        return f"Ready — tap {self.shortcut_description} to dictate"
 
     def _shortcut_changed(self, binding: str) -> None:
         self.shortcut_description = shortcut_label(binding) if binding else None
@@ -908,7 +962,7 @@ class PurrApplication(Gtk.Application):
         self._show_ready()
         self._sync_record_controls()
         if self.indicator_model:
-            self.indicator_model.set_label(self.model.name)
+            self.indicator_model.set_label(f"{self.model.name} ({self.server.backend_label})")
         self._refresh_model_ui()
         return False
 
@@ -1063,10 +1117,16 @@ class PurrApplication(Gtk.Application):
         rms = math.sqrt(sum_squares / total_samples) if total_samples else 0
         rms_db = 20 * math.log10(rms / 32768) if rms else -120.0
         LOG.info(
-            "Stream captured %.2fs, peak %.1f dBFS, RMS %.1f dBFS, raw=%r",
-            duration, peak_db, rms_db, raw_text,
+            "Stream captured %.2fs, peak %.1f dBFS, RMS %.1f dBFS, raw=%s",
+            duration, peak_db, rms_db, self._loggable(raw_text),
         )
         GLib.idle_add(self._stream_finished, raw_text, duration, peak_db, error)
+
+    def _loggable(self, text: str) -> str:
+        """Dictated words stay out of the log unless log_transcripts is on."""
+        if self.config.get("log_transcripts", False):
+            return repr(text)
+        return f"<{len(text.split())} words>"
 
     def _stream_update(self, raw: str, eou: bool, eob: bool, final: bool) -> bool:
         self.stream_raw = raw
@@ -1112,7 +1172,16 @@ class PurrApplication(Gtk.Application):
             # words now would turn them into Ctrl/Alt chords.
             GLib.timeout_add(50, self._stream_finished, raw, duration, peak_db, error)
             return False
+        # stop_recording clears the recorder first, so a recorder still set
+        # here ended without being asked: the microphone failed or vanished.
+        ended_early = self.recorder is not None
         self.recorder = None
+        if ended_early and not error:
+            error = (
+                "The microphone stopped unexpectedly — dictation ended"
+                if self.stream_typed or duration >= 0.20
+                else "Could not record from the microphone — check that it is connected"
+            )
         if error:
             # Everything already typed was finalized by the engine. Keep it, so a
             # late failure cannot erase minutes of dictation.
@@ -1125,7 +1194,7 @@ class PurrApplication(Gtk.Application):
             return self._complete("", 0, "No speech detected")
         self._stream_update(raw, False, False, True)
         text, _drop_previous = self.processor.apply(raw)
-        LOG.info("Live transcript final=%r", text)
+        LOG.info("Live transcript final=%s", self._loggable(text))
         if text and self.keyboard and not text.endswith("\n"):
             self.keyboard.type_text(" ")
         self._complete("", 0, None)
@@ -1148,7 +1217,7 @@ class PurrApplication(Gtk.Application):
                 return
             raw = self.server.transcribe(path, multipart_body)
             text, drop_previous = self.processor.apply(raw)
-            LOG.info("Transcript raw=%r final=%r", raw, text)
+            LOG.info("Transcript raw=%s final=%s", self._loggable(raw), self._loggable(text))
             GLib.idle_add(self._complete, text, drop_previous, None)
         except Exception as error:
             LOG.exception("Dictation failed")
@@ -1172,7 +1241,9 @@ class PurrApplication(Gtk.Application):
             if message in ("No speech detected", "Too short — speak for a moment before stopping"):
                 self._flash_status(message)
             else:
-                self._set_status(message, message.startswith(("No microphone", "Transcription", "Could not")))
+                self._set_status(
+                    message, message.startswith(("No microphone", "Transcription", "Could not", "The microphone"))
+                )
                 self._notify("Purr dictation failed", message)
             return False
         if drop_previous and self.keyboard:
@@ -1194,7 +1265,7 @@ class PurrApplication(Gtk.Application):
         self.model_combo.remove_all()
         for model in MODELS:
             installed = "  •  installed" if self.store.installed(model) else f"  •  {model.size_label}"
-            live = "  •  LIVE" if model.streaming else ""
+            live = "  •  live" if model.streaming else ""
             self.model_combo.append(model.id, model.name + live + installed)
         self.model_combo.set_active_id(active_id)
 
@@ -1210,13 +1281,19 @@ class PurrApplication(Gtk.Application):
             f"{selected.summary}\n{selected.languages}  ·  {selected.size_label}"
         )
         active = selected.id == self.model.id
+        self.model_state.set_visible(active)
+        self.model_buttons.set_visible(not active)
+        if active:
+            self.model_state.set_text(
+                f"✓  In use  ·  {self.server.backend_label}" if self.ready else "Loading…"
+            )
+            return False
         self.model_action.set_label(
-            "In use" if active else "Use model" if installed else f"Download & use ({selected.size_label})"
+            "Use model" if installed else f"Download & use ({selected.size_label})"
         )
-        self.model_action.set_sensitive(
-            not active and not self.busy and not self.downloading and not self.recorder
-        )
-        self.model_remove.set_sensitive(installed and not active and selected.engine != "whisper")
+        self.model_action.set_sensitive(not self.busy and not self.downloading and not self.recorder)
+        self.model_action.show()
+        self.model_remove.set_visible(installed and selected.engine != "whisper")
         return False
 
     def _model_action_clicked(self, _button) -> None:

@@ -133,7 +133,8 @@ and runs the test and smoke-test suite.
 Nemotron is the default: the microphone opens the instant you tap the shortcut,
 so you can start talking immediately, and cache-aware transcription is typed
 directly into the focused application through Purr's virtual keyboard, with no
-time limit on a dictation. Linux
+time limit on a dictation. Purr renews the stream at natural pauses, so long
+dictation stays punctuated instead of turning into one run-on sentence. Linux
 Unicode compose is used for accents, symbols, and non-Latin text, avoiding
 background Wayland clipboard restrictions. Say “scratch that” to remove the
 preceding dictated word immediately. The second tap finalizes the stream. The

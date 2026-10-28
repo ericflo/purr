@@ -93,7 +93,8 @@ The Linux port has a smaller but still sensitive permission set:
 
 Purr's Linux shortcut does not monitor raw keyboard input: GNOME recognizes the configured
 shortcut and invokes a D-Bus application action. Temporary batch audio is deleted after
-transcription, but diagnostic logs include recognized text in plaintext. See
+transcription. Diagnostic logs record word counts rather than dictated text
+unless `log_transcripts` is turned on. See
 [LINUX.md](LINUX.md#local-data-and-network-access) for exact paths.
 
 ### What Purr does not do

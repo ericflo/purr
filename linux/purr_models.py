@@ -6,8 +6,10 @@ import ctypes
 from dataclasses import dataclass
 import json
 import logging
+import math
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import time
@@ -30,6 +32,8 @@ class ModelSpec:
     languages: str
     streaming: bool = False
     engine: str = "parakeet"
+    # Renew the live stream at pauses; see ParakeetStream.
+    renew_at_pauses: bool = False
 
     @property
     def url(self) -> str:
@@ -52,6 +56,7 @@ MODELS = (
         "capitalization, and prompt-selected multilingual recognition.",
         "40+ language locales",
         True,
+        renew_at_pauses=True,
     ),
     ModelSpec(
         "eou-streaming-q5",
@@ -178,7 +183,7 @@ class WhisperEngine:
 
     @property
     def backend_label(self) -> str:
-        return "Whisper · Radeon/Vulkan" if self.using_gpu else "Whisper · CPU fallback"
+        return "batch · Vulkan" if self.using_gpu else "batch · CPU fallback"
 
     def start(self) -> None:
         if not self.binary.is_file() or not self.model.is_file():
@@ -261,9 +266,35 @@ class WhisperEngine:
 
 
 class ParakeetStream:
-    def __init__(self, engine: "ParakeetEngine", handle: int):
+    """A live stream that, if asked, renews the engine stream at pauses.
+
+    Nemotron stops punctuating over a long cache-aware stream: on recorded
+    speech a single stream fell to about 3 marks per 100 words within minutes,
+    while streams renewed at pauses kept 15. Renewal finalizes the old stream
+    (which closes its sentence) and starts a fresh one; the text stays one
+    continuous transcript for the caller.
+    """
+
+    RENEW_AFTER = 8.0  # seconds of stream before a pause may renew it
+    RENEW_PAUSE = 1.0  # seconds without new text that make a pause
+    # A cut needs the audio itself to be quiet too: text lags speech, so a
+    # textless second can end just as the next word begins.
+    QUIET_RATIO = 0.12  # chunk RMS relative to the recent speech level
+    QUIET_CHUNKS = 2
+    LOCALE_TAG = re.compile(r"<[a-z]{2}(?:-[a-z]{2})?>", re.IGNORECASE)
+    SENTENCE_END = re.compile(r"[.?!…:\n]$")
+    # A capitalized ordinary word; "I", "I'm", acronyms, and CamelCase never match.
+    CONTINUED_WORD = re.compile(r"^(\s*)([A-Z])([a-z][a-z']*)\b")
+
+    def __init__(self, engine: "ParakeetEngine", handle: int, renew_at_pauses: bool = False):
         self.engine = engine
         self.handle = handle
+        self.renew_at_pauses = renew_at_pauses
+        self.renewals = 0
+        self.emitted = ""  # recent output, to join renewed text cleanly
+        self.age = self.quiet = self.level = 0.0
+        self.quiet_chunks = 0
+        self.heard = self.renewed = False
 
     def _take_json(self, pointer: int) -> dict:
         if not pointer:
@@ -277,11 +308,61 @@ class ParakeetStream:
         count = len(pcm) // 2
         source = (ctypes.c_int16 * count).from_buffer_copy(pcm[: count * 2])
         floats = (ctypes.c_float * count)(*(sample / 32768.0 for sample in source))
-        return self._take_json(
+        result = self._take_json(
             self.engine.lib.parakeet_capi_stream_feed_json(self.handle, floats, count)
         )
+        if not self.renew_at_pauses or not count:
+            return result
+        text = result.get("text", "")
+        if self.renewed and text.strip():
+            text = self._continue(text)
+            self.renewed = False
+        rms = math.sqrt(sum(sample * sample for sample in source) / count)
+        self.level = max(rms, self.level * 0.995)
+        self.quiet_chunks = self.quiet_chunks + 1 if rms < self.level * self.QUIET_RATIO else 0
+        self.age += count / 16000
+        if text.strip():
+            self.quiet, self.heard = 0.0, True
+        else:
+            self.quiet += count / 16000
+        if (
+            self.heard and self.age >= self.RENEW_AFTER and self.quiet >= self.RENEW_PAUSE
+            and self.quiet_chunks >= self.QUIET_CHUNKS
+        ):
+            text += self._renew()
+        self.emitted = (self.emitted + text)[-64:]
+        result["text"] = text
+        return result
+
+    def _renew(self) -> str:
+        closing = self._finalize_handle().get("text", "")
+        handle = self.engine.begin_handle()
+        self.engine.lib.parakeet_capi_stream_free(self.handle)
+        self.handle = handle
+        self.renewals += 1
+        self.age = self.quiet = 0.0
+        self.heard, self.renewed = False, True
+        return closing
+
+    def _continue(self, text: str) -> str:
+        """Join a renewed stream's first words onto the transcript so far."""
+        if self.emitted and not self.emitted[-1].isspace() and not text[0].isspace():
+            text = " " + text
+        before = self.LOCALE_TAG.sub("", self.emitted).rstrip()
+        if before and not self.SENTENCE_END.search(before):
+            # A fresh stream capitalizes its first word even mid-sentence.
+            text = self.CONTINUED_WORD.sub(
+                lambda m: m[1] + m[2].lower() + m[3], text, count=1
+            )
+        return text
 
     def finalize(self) -> dict:
+        result = self._finalize_handle()
+        if self.renewed and result.get("text", "").strip():
+            result["text"] = self._continue(result["text"])
+        return result
+
+    def _finalize_handle(self) -> dict:
         return self._take_json(self.engine.lib.parakeet_capi_stream_finalize_json(self.handle))
 
     def close(self) -> None:
@@ -291,18 +372,21 @@ class ParakeetStream:
 
 
 class ParakeetEngine:
-    def __init__(self, config: dict, build: Path, model: Path, streaming: bool):
+    def __init__(
+        self, config: dict, build: Path, model: Path, streaming: bool,
+        renew_at_pauses: bool = False,
+    ):
         self.config = config
         self.build_dir = build / "parakeet.cpp" / "build"
         self.model = model
         self.streaming = streaming
+        self.renew_at_pauses = renew_at_pauses
         self.ctx = 0
         self.lib = None
 
     @property
     def backend_label(self) -> str:
-        mode = "live" if self.streaming else "batch"
-        return f"NVIDIA Parakeet · {mode} · Vulkan"
+        return f"{'live' if self.streaming else 'batch'} · Vulkan"
 
     def start(self) -> None:
         library = self.build_dir / "libparakeet.so"
@@ -353,11 +437,14 @@ class ParakeetEngine:
     def begin_stream(self) -> ParakeetStream:
         if not self.streaming:
             raise RuntimeError("The selected model is not a streaming model")
+        return ParakeetStream(self, self.begin_handle(), self.renew_at_pauses)
+
+    def begin_handle(self) -> int:
         language = str(self.config.get("language", "en") or "auto").encode()
         handle = self.lib.parakeet_capi_stream_begin_lang(self.ctx, language)
         if not handle:
             raise RuntimeError(self.last_error())
-        return ParakeetStream(self, handle)
+        return handle
 
     def stop(self) -> None:
         if self.ctx and self.lib:
@@ -375,4 +462,7 @@ def create_engine(config: dict, build: Path, state: Path, store: ModelStore):
         model = fallback
     if model.engine == "whisper":
         return WhisperEngine(config, build, store.path(model), state), model
-    return ParakeetEngine(config, build, store.path(model), model.streaming), model
+    return (
+        ParakeetEngine(config, build, store.path(model), model.streaming, model.renew_at_pauses),
+        model,
+    )

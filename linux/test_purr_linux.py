@@ -30,7 +30,7 @@ from purr_linux import (
     shortcut_label,
     transcript_preview,
 )
-from purr_models import DEFAULT_MODEL_ID, MODEL_BY_ID, ModelSpec, ModelStore
+from purr_models import DEFAULT_MODEL_ID, MODEL_BY_ID, ModelSpec, ModelStore, ParakeetStream
 
 
 def tearDownModule():
@@ -65,6 +65,58 @@ class ScreenKeyboard:
     def backspace_word(self, count=1):
         for _ in range(count):
             self.screen = re.sub(r"\S+\s*$", "", self.screen)
+
+
+class UnmappedWindow(Gtk.Window):
+    """A real window whose contents are shown but which never maps on the desktop."""
+
+    def show_all(self):
+        self.get_child().show_all()
+
+
+def windowed_app(keyboard=None):
+    app = live_app(keyboard or ScreenKeyboard())
+    app.server.backend_label = "live · Vulkan"
+    with mock.patch.object(purr_linux.Gtk, "ApplicationWindow", lambda application: UnmappedWindow()), \
+            mock.patch.object(purr_linux, "list_microphones", return_value=[]), \
+            mock.patch.object(purr_linux.subprocess, "run", side_effect=OSError):
+        app._build_window()
+    return app
+
+
+class ScriptedEngine:
+    """Stands in for parakeet.cpp: each stream emits scripted text, one entry per feed."""
+
+    def __init__(self, scripts):
+        self.scripts = list(scripts)  # per stream: (feed texts, finalize text)
+        self.lib = self
+        self.handles = 0
+
+    def begin_handle(self):
+        self.handles += 1
+        feeds, closing = self.scripts.pop(0)
+        self.current = (iter(feeds), closing)
+        return self.handles
+
+    def parakeet_capi_stream_feed_json(self, _handle, _floats, _count):
+        return {"text": next(self.current[0], "")}
+
+    def parakeet_capi_stream_finalize_json(self, _handle):
+        return {"text": self.current[1]}
+
+    def parakeet_capi_stream_free(self, _handle):
+        pass
+
+
+def scripted_stream(scripts):
+    engine = ScriptedEngine(scripts)
+    stream = ParakeetStream(engine, engine.begin_handle(), renew_at_pauses=True)
+    stream._take_json = lambda result: result
+    return stream
+
+
+SPEECH = array.array("h", [9000, -9000] * 1600).tobytes()  # 200 ms, loud
+SILENCE = bytes(6400)  # 200 ms
 
 
 def live_app(keyboard):
@@ -122,6 +174,47 @@ class PostProcessorTests(unittest.TestCase):
         preview = transcript_preview("word " * 2000)
         self.assertLessEqual(len(preview), 281)
         self.assertTrue(preview.startswith("…"))
+
+
+class StreamRenewalTests(unittest.TestCase):
+    def feed(self, stream, chunks):
+        return "".join(stream.feed_s16(chunk)["text"] for chunk in chunks)
+
+    def test_long_streams_renew_at_a_pause_and_read_as_one_transcript(self):
+        first = [" So"] + [" word"] * 44  # 9 s of speech
+        stream = scripted_stream([(first, "."), ([" Next", " part"], ""), ([], "")])
+        text = self.feed(stream, [SPEECH] * 45 + [SILENCE] * 5)
+        self.assertEqual(stream.renewals, 1)
+        self.assertTrue(text.endswith("word."))
+        text += self.feed(stream, [SPEECH] * 2) + stream.finalize()["text"]
+        # A closed sentence keeps the fresh stream's capital.
+        self.assertTrue(text.endswith("word. Next part"))
+
+    def test_mid_sentence_renewal_continues_in_lowercase_without_fusing_words(self):
+        stream = scripted_stream([([" my"] + [" account"] * 44 + [" has"], ""), (["Access", " to"], ""), ([], "")])
+        text = self.feed(stream, [SPEECH] * 46 + [SILENCE] * 5 + [SPEECH] * 2)
+        self.assertEqual(stream.renewals, 1)
+        self.assertTrue(text.endswith("account has access to"), text[-40:])
+
+    def test_names_and_i_keep_their_capitals_after_renewal(self):
+        for word in ("I", "I'm", "OpenAI", "NASA"):
+            stream = scripted_stream([([" so"] * 45, ""), ([" " + word], ""), ([], "")])
+            text = self.feed(stream, [SPEECH] * 45 + [SILENCE] * 5 + [SPEECH])
+            self.assertTrue(text.endswith(" " + word), (word, text[-20:]))
+
+    def test_no_renewal_during_speech_or_short_streams(self):
+        # Text pauses while the audio stays loud: text lags speech, so no cut.
+        stream = scripted_stream([([" word"] * 45, ""), ([], "")])
+        self.feed(stream, [SPEECH] * 60)
+        self.assertEqual(stream.renewals, 0)
+        # A quiet pause in the first seconds keeps the stream.
+        stream = scripted_stream([([" word"] * 10, ""), ([], "")])
+        self.feed(stream, [SPEECH] * 10 + [SILENCE] * 10)
+        self.assertEqual(stream.renewals, 0)
+
+    def test_only_models_that_ask_for_it_renew(self):
+        self.assertTrue(MODEL_BY_ID["nemotron-streaming-q5"].renew_at_pauses)
+        self.assertFalse(MODEL_BY_ID["eou-streaming-q5"].renew_at_pauses)
 
 
 class AudioTests(unittest.TestCase):
@@ -302,6 +395,77 @@ class LinuxIntegrationTests(unittest.TestCase):
         saved = json.loads(purr_linux.CONFIG_FILE.read_text())
         self.assertEqual(saved["microphone"], yeti[0])
         self.assertEqual(saved["microphone_label"], "Yeti Stereo Microphone")
+
+    def test_active_model_shows_one_clear_state_not_disabled_buttons(self):
+        app = windowed_app()
+        self.assertTrue(app.model_state.get_visible())
+        self.assertIn("In use", app.model_state.get_text())
+        self.assertIn("live · Vulkan", app.model_state.get_text())
+        self.assertFalse(app.model_buttons.get_visible())
+        app.model_combo.set_active_id("whisper-turbo-q5")
+        self.assertFalse(app.model_state.get_visible())
+        self.assertTrue(app.model_buttons.get_visible())
+        self.assertEqual(app.model_action.get_label(), "Use model")
+        # The built-in fallback cannot be removed, so no Remove button at all.
+        self.assertFalse(app.model_remove.get_visible())
+
+    def test_status_shows_a_matching_state_indicator(self):
+        app = windowed_app()
+        app._show_ready()
+        self.assertTrue(app.status_icon.get_style_context().has_class("purr-ready"))
+        self.assertEqual(app.status_text, "Ready — set a shortcut with Shortcut…")
+        app.recorder = mock.Mock()
+        app._sync_record_controls()
+        app._set_status("Listening…")
+        self.assertTrue(app.status_icon.get_style_context().has_class("purr-listening"))
+        # While listening the main button is a red Stop, not the calm blue Start.
+        button = app.record_button.get_style_context()
+        self.assertTrue(button.has_class("destructive-action"))
+        self.assertFalse(button.has_class("suggested-action"))
+        app.recorder, app.busy = None, True
+        app._set_status("Finalizing transcript…")
+        self.assertTrue(app.status_spinner.get_visible())
+        self.assertFalse(app.status_icon.get_visible())
+        app.busy = False
+        app._set_status("Download failed", True)
+        self.assertTrue(app.status_icon.get_style_context().has_class("purr-error"))
+        self.assertFalse(app.status_spinner.get_visible())
+
+    def test_practice_placeholder_hides_once_words_arrive(self):
+        app = windowed_app()
+        self.assertTrue(app.practice_placeholder.get_visible())
+        app.practice.get_buffer().set_text("Hello")
+        self.assertFalse(app.practice_placeholder.get_visible())
+        app.practice.get_buffer().set_text("")
+        self.assertTrue(app.practice_placeholder.get_visible())
+
+    def test_microphone_that_stops_on_its_own_is_reported(self):
+        app = live_app(ScreenKeyboard())
+        app.recorder = mock.Mock()  # still set: Purr never asked it to stop
+        app._stream_update("words so far", False, False, False)
+        app._stream_finished("words so far", 12.0, -6.0, None)
+        self.assertIsNone(app.recorder)
+        self.assertEqual(app.keyboard.screen, "words so far")
+        self.assertTrue(app.status_error)
+        self.assertIn("stopped unexpectedly", app.notifications[-1][1])
+
+    def test_microphone_that_never_starts_is_not_called_too_short(self):
+        app = live_app(ScreenKeyboard())
+        app.recorder = mock.Mock()
+        app._stream_finished("", 0.0, -120.0, None)
+        self.assertTrue(app.status_error)
+        self.assertIn("Could not record", app.status_text)
+
+    def test_dictated_words_stay_out_of_the_log_by_default(self):
+        app = live_app(ScreenKeyboard())
+        with self.assertLogs("purr", "INFO") as logs:
+            app._stream_finished("my bank pin is four four", 3.0, -3.0, None)
+        self.assertNotIn("bank", "\n".join(logs.output))
+        self.assertIn("<6 words>", "\n".join(logs.output))
+        app.config["log_transcripts"] = True
+        with self.assertLogs("purr", "INFO") as logs:
+            app._stream_finished("diagnose this", 3.0, -3.0, None)
+        self.assertIn("diagnose this", "\n".join(logs.output))
 
     def test_tests_never_touch_the_real_log_or_config(self):
         self.assertTrue(str(purr_linux.STATE).startswith(SANDBOX))

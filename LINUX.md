@@ -114,13 +114,16 @@ the settings window is closed and starts automatically on future sign-ins.
    away: the microphone opens the moment the shortcut fires.
 3. Finalized words are typed into the focused app as they are decoded, starting
    once the shortcut keys are released. There is no time limit; pauses do not
-   end dictation.
+   end dictation. Nemotron punctuates and capitalizes as you go; Purr renews
+   its stream at natural pauses so punctuation does not fade during long
+   dictation.
 4. Tap the shortcut again to finish. Recording stops on the tap, and the last
    words are typed as soon as the keys are up.
 
 If Purr cannot start yet (the model is still loading, the previous dictation is
 still finishing, or the engine failed), the tap shows a notification explaining
-why instead of doing nothing. The top-bar menu's **Start Dictation** item
+why instead of doing nothing. If the microphone stops or disappears during
+dictation, Purr keeps the words already typed and says that dictation ended. The top-bar menu's **Start Dictation** item
 switches to **Stop Dictation** while Purr is listening.
 
 The Purr window has a practice box: **Start Dictation** in the window types
@@ -186,9 +189,11 @@ Linux files are stored in these locations:
 | `~/.local/share/applications/com.arunbrahma.purr.desktop` | Per-user launcher |
 | `~/.config/autostart/com.arunbrahma.purr.desktop` | Per-user sign-in autostart entry |
 
-The application log includes recognized text for diagnostics. It never leaves
-the machine, but it is plaintext and may contain sensitive dictated content.
-Remove or protect that log as you would a transcript.
+The application log records timings, audio levels, and word counts, not the
+words you dictate. To diagnose recognition problems, set `log_transcripts` to
+`true` in the configuration; the log then contains dictated text in plaintext,
+so turn it off again and delete the log afterwards. Logs written by Purr
+versions before this setting existed may still contain dictated text.
 
 ## Configuration
 
@@ -201,6 +206,7 @@ The GUI writes `~/.config/purr/config.json`. Supported keys are:
 - `trim_fillers`: remove common fillers such as “um” and “uh”
 - `voice_commands`: enable spoken punctuation and “scratch that”
 - `dictionary`: JSON object mapping spoken forms to replacements
+- `log_transcripts`: include dictated text in `purr.log` (default `false`)
 - `initial_prompt`: optional Whisper prompt
 - `show_overlay`: show a non-focusable listening overlay
 
