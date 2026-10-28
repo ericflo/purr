@@ -31,7 +31,7 @@ Install the build and desktop dependencies:
 ```bash
 sudo pacman -S --needed \
   base-devel git cmake ninja curl libarchive \
-  python-gobject python-dbus gtk3 libayatana-appindicator \
+  python-gobject gtk3 libayatana-appindicator \
   gnome-shell-extension-appindicator \
   pipewire-audio pipewire-pulse libpulse libnotify \
   vulkan-headers shaderc vulkan-icd-loader vulkan-tools
@@ -110,14 +110,23 @@ Launch Purr from GNOME's app grid or run `purr`. It remains in the top bar when
 the settings window is closed and starts automatically on future sign-ins.
 
 1. Focus a normal text field.
-2. Tap <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> to begin.
-3. Speak. Finalized words are typed into the focused app as they are decoded.
-   There is no time limit; pauses do not end dictation.
-4. Tap the shortcut again to finish the stream.
+2. Tap <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> and start speaking right
+   away: the microphone opens the moment the shortcut fires.
+3. Finalized words are typed into the focused app as they are decoded, starting
+   once the shortcut keys are released. There is no time limit; pauses do not
+   end dictation.
+4. Tap the shortcut again to finish. Recording stops on the tap, and the last
+   words are typed as soon as the keys are up.
+
+If Purr cannot start yet (the model is still loading, the previous dictation is
+still finishing, or the engine failed), the tap shows a notification explaining
+why instead of doing nothing. The top-bar menu's **Start Dictation** item
+switches to **Stop Dictation** while Purr is listening.
 
 Click **Shortcut…** in Purr to open GNOME's keyboard settings. Purr preserves a
-shortcut changed there. All text is typed through Purr's virtual keyboard; Purr
-never reads or writes the clipboard.
+shortcut changed there and shows the new one immediately. All text is typed
+through Purr's virtual keyboard; Purr never reads or writes the clipboard.
+Optional model downloads continue in the background while you dictate.
 
 Spoken commands include “new paragraph,” “new line,” punctuation names, and
 “scratch that.” The last command removes the preceding dictated word, including

@@ -29,9 +29,6 @@ gi.require_version("AyatanaAppIndicator3", "0.1")
 from gi.repository import AyatanaAppIndicator3 as AppIndicator
 from gi.repository import Gdk, Gio, GLib, Gtk
 
-import dbus
-from dbus.mainloop.glib import DBusGMainLoop
-
 from purr_models import (
     DEFAULT_MODEL_ID,
     MODEL_BY_ID,
@@ -224,6 +221,12 @@ def transcript_preview(text: str, limit: int = 280) -> str:
     return text if len(text) <= limit else "…" + text[-limit:].lstrip()
 
 
+def shortcut_label(binding: str) -> str:
+    """Turn a GSettings accelerator such as <Control><Alt>space into Ctrl+Alt+Space."""
+    key, modifiers = Gtk.accelerator_parse(binding)
+    return Gtk.accelerator_get_label(key, modifiers) if key else binding
+
+
 def normalize_wav(path: Path) -> tuple[float, float]:
     """Remove DC and boost quiet speech toward -3 dBFS in place."""
     with wave.open(str(path), "rb") as source:
@@ -408,128 +411,6 @@ class UInputKeyboard:
                 self.device.close()
 
 
-class GlobalShortcuts:
-    def __init__(self, on_press, on_release, on_status):
-        self.on_press = on_press
-        self.on_release = on_release
-        self.on_status = on_status
-        self.bus = dbus.SessionBus()
-        portal = self.bus.get_object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop")
-        try:
-            registry = dbus.Interface(portal, "org.freedesktop.host.portal.Registry")
-            registry.Register(APP_ID, dbus.Dictionary(signature="sv"))
-        except dbus.DBusException as error:
-            # Older portal versions do not expose Registry; their process-based
-            # host-app detection is sufficient.
-            if "UnknownInterface" not in error.get_dbus_name():
-                LOG.warning("Portal app registration failed: %s", error)
-        self.interface = dbus.Interface(portal, "org.freedesktop.portal.GlobalShortcuts")
-        self.session_handle = None
-        self.interface.connect_to_signal("Activated", self._activated)
-        self.interface.connect_to_signal("Deactivated", self._deactivated)
-        self.interface.connect_to_signal("ShortcutsChanged", self._changed)
-
-    def _watch(self, handle, callback) -> None:
-        request = self.bus.get_object("org.freedesktop.portal.Desktop", handle)
-        dbus.Interface(request, "org.freedesktop.portal.Request").connect_to_signal("Response", callback)
-
-    def start(self) -> None:
-        token = "purr_" + uuid.uuid4().hex[:12]
-        options = {
-            "handle_token": dbus.String(token),
-            "session_handle_token": dbus.String("purr_" + uuid.uuid4().hex[:12]),
-        }
-        handle = self.interface.CreateSession(dbus.Dictionary(options, signature="sv"))
-        self._watch(handle, self._session_created)
-
-    def _session_created(self, response, results) -> None:
-        if response != 0:
-            self.on_status("Global shortcut permission was not granted", True)
-            return
-        self.session_handle = str(results["session_handle"])
-        options = {"handle_token": dbus.String("purr_" + uuid.uuid4().hex[:12])}
-        handle = self.interface.ListShortcuts(
-            dbus.ObjectPath(self.session_handle), dbus.Dictionary(options, signature="sv")
-        )
-        self._watch(handle, self._listed)
-
-    def _listed(self, response, results) -> None:
-        shortcuts = results.get("shortcuts", []) if response == 0 else []
-        if shortcuts:
-            self._report(shortcuts)
-        else:
-            self._bind()
-
-    def _bind(self) -> None:
-        shortcut = (
-            dbus.String("dictate"),
-            dbus.Dictionary(
-                {
-                    "description": dbus.String("Dictate with Purr"),
-                    "preferred_trigger": dbus.String("CTRL+ALT+space"),
-                },
-                signature="sv",
-            ),
-        )
-        options = {"handle_token": dbus.String("purr_" + uuid.uuid4().hex[:12])}
-        handle = self.interface.BindShortcuts(
-            dbus.ObjectPath(self.session_handle),
-            dbus.Array([shortcut], signature="(sa{sv})"),
-            "",
-            dbus.Dictionary(options, signature="sv"),
-        )
-        self._watch(handle, self._bound)
-
-    def _bound(self, response, results) -> None:
-        if response != 0:
-            self.on_status("No global shortcut configured", True)
-            return
-        self._report(results.get("shortcuts", []))
-
-    def _report(self, shortcuts) -> None:
-        for shortcut_id, properties in shortcuts:
-            if str(shortcut_id) == "dictate":
-                description = str(properties.get("trigger_description", "Configured shortcut"))
-                self.on_status(f"Ready — hold {description}", False)
-
-    def _activated(self, session_handle, shortcut_id, _timestamp, _options) -> None:
-        if str(session_handle) == self.session_handle and str(shortcut_id) == "dictate":
-            self.on_press()
-
-    def _deactivated(self, session_handle, shortcut_id, _timestamp, _options) -> None:
-        if str(session_handle) == self.session_handle and str(shortcut_id) == "dictate":
-            self.on_release()
-
-    def _changed(self, session_handle, shortcuts) -> None:
-        if str(session_handle) == self.session_handle:
-            self._report(shortcuts)
-
-    def configure(self) -> None:
-        if self.session_handle:
-            try:
-                self.interface.ConfigureShortcuts(dbus.ObjectPath(self.session_handle), "", {})
-            except dbus.DBusException as error:
-                # GNOME currently exposes the v2 method in introspection even
-                # when its selected backend only implements portal v1.
-                if error.get_dbus_name() == "org.freedesktop.DBus.Error.UnknownMethod":
-                    self.on_status(
-                        "This GNOME version keeps the existing shortcut: "
-                        "Press <Control><Alt>space",
-                        False,
-                    )
-                else:
-                    self.on_status(f"Could not open shortcut settings: {error}", True)
-
-    def close(self) -> None:
-        if not self.session_handle:
-            return
-        try:
-            session = self.bus.get_object("org.freedesktop.portal.Desktop", self.session_handle)
-            dbus.Interface(session, "org.freedesktop.portal.Session").Close()
-        except dbus.DBusException:
-            pass
-
-
 class GnomeShortcut:
     """A native GNOME custom shortcut that emits one toggle action per press."""
 
@@ -537,9 +418,11 @@ class GnomeShortcut:
     SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
     CUSTOM_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
 
-    def __init__(self, on_status):
+    def __init__(self, on_binding, on_status):
+        self.on_binding = on_binding
         self.on_status = on_status
         self.binding = "<Control><Alt>space"
+        self.shortcut: Gio.Settings | None = None
 
     def start(self) -> None:
         settings = Gio.Settings.new(self.SCHEMA)
@@ -559,7 +442,16 @@ class GnomeShortcut:
                 self.binding = existing
         shortcut.set_string("command", f"gapplication action {APP_ID} dictate")
         Gio.Settings.sync()
-        self.on_status(f"Ready — tap {self.binding}", False)
+        # Follow changes made in GNOME Settings while Purr is running. GSettings
+        # only emits changed signals for keys that have been read.
+        self.shortcut = shortcut
+        shortcut.connect("changed::binding", self._binding_changed)
+        shortcut.get_string("binding")
+        self.on_binding(self.binding)
+
+    def _binding_changed(self, settings, _key) -> None:
+        self.binding = settings.get_string("binding")
+        self.on_binding(self.binding)
 
     def configure(self) -> None:
         try:
@@ -590,20 +482,25 @@ class PurrApplication(Gtk.Application):
         self.stream_thread: threading.Thread | None = None
         self.ready = False
         self.busy = False
+        self.downloading = False
+        self.engine_error: str | None = None
         self.shutting_down = False
         self.shortcut_description: str | None = None
+        self.status_text = "Starting transcription engine…"
+        self.status_error = False
         self.stream_typed = ""
         self.stream_raw = ""
         self.stream_external_drops = 0
         self.shortcut_down = False
+        self.shortcut_guard = 0
         self.shortcut_pressed_at = 0.0
-        self.pending_toggle_stop = False
         self.window = self.overlay = None
         self.status_label = self.last_label = self.overlay_label = None
         self.record_button = self.model_combo = self.model_action = None
         self.microphone_combo = None
         self.model_remove = self.model_description = self.download_progress = None
-        self.indicator = None
+        self.indicator = self.indicator_status = self.indicator_model = None
+        self.indicator_dictate = None
 
     def do_startup(self) -> None:
         Gtk.Application.do_startup(self)
@@ -619,7 +516,7 @@ class PurrApplication(Gtk.Application):
             LOG.exception("uinput setup failed")
             self._set_status(f"Text injection unavailable: {error}", True)
         try:
-            self.shortcuts = GnomeShortcut(self._shortcut_status)
+            self.shortcuts = GnomeShortcut(self._shortcut_changed, self._set_status)
             self.shortcuts.start()
         except Exception as error:
             LOG.exception("Global shortcut setup failed")
@@ -656,7 +553,7 @@ class PurrApplication(Gtk.Application):
         )
         self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
         menu = Gtk.Menu()
-        self.indicator_status = Gtk.MenuItem(label="Starting transcription engine…")
+        self.indicator_status = Gtk.MenuItem(label=self.status_text)
         self.indicator_status.set_sensitive(False)
         menu.append(self.indicator_status)
         self.indicator_model = Gtk.MenuItem(label=self.model.name)
@@ -669,9 +566,9 @@ class PurrApplication(Gtk.Application):
         configure = Gtk.MenuItem(label="Change Dictation Shortcut…")
         configure.connect("activate", lambda _item: self.shortcuts and self.shortcuts.configure())
         menu.append(configure)
-        dictate = Gtk.MenuItem(label="Start / Stop Dictation")
-        dictate.connect("activate", lambda _item: self._toggle_recording(None))
-        menu.append(dictate)
+        self.indicator_dictate = Gtk.MenuItem(label="Start Dictation")
+        self.indicator_dictate.connect("activate", lambda _item: self._toggle_recording(None))
+        menu.append(self.indicator_dictate)
         menu.append(Gtk.SeparatorMenuItem())
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", lambda _item: self.quit())
@@ -693,7 +590,9 @@ class PurrApplication(Gtk.Application):
 
         status_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         status_card.get_style_context().add_class("purr-card")
-        self.status_label = Gtk.Label(label="Starting transcription engine…", xalign=0)
+        # The window may be built long after startup (autostart), so begin from
+        # the current status instead of a stale placeholder.
+        self.status_label = Gtk.Label(label=self.status_text, xalign=0)
         self.status_label.set_line_wrap(True)
         status_card.pack_start(self.status_label, False, False, 0)
         self.last_label = Gtk.Label(
@@ -707,7 +606,6 @@ class PurrApplication(Gtk.Application):
         self.record_button = Gtk.Button(label="Start Dictation")
         self.record_button.get_style_context().add_class("suggested-action")
         self.record_button.get_style_context().add_class("purr-record")
-        self.record_button.set_sensitive(False)
         self.record_button.connect("clicked", self._toggle_recording)
         buttons.pack_start(self.record_button, True, True, 0)
         shortcut_button = Gtk.Button(label="Shortcut…")
@@ -795,6 +693,7 @@ class PurrApplication(Gtk.Application):
         self.window.add(outer)
         self.window.show_all()
         self.download_progress.hide()
+        self._sync_record_controls()
         self._refresh_model_ui()
 
     def _build_overlay(self) -> None:
@@ -847,51 +746,81 @@ class PurrApplication(Gtk.Application):
 
     def _native_shortcut(self, _action, _parameter) -> None:
         now = time.monotonic()
+        repeated = now - self.shortcut_pressed_at < 0.8
+        self.shortcut_pressed_at = now
+        self._hold_typing_for_shortcut()
         # GNOME normally invokes a custom shortcut once per press. If a keyboard
         # does repeat it, keep extending this guard so a held key cannot toggle
         # dictation back off.
-        if now - self.shortcut_pressed_at < 0.8:
-            self.shortcut_pressed_at = now
-            return
-        self.shortcut_pressed_at = now
-        self.shortcut_down = True
-        self.pending_toggle_stop = bool(self.recorder)
-        # Give GNOME time to finish dispatching the shortcut before live typing
-        # begins or the final stream tail is sent through the virtual keyboard.
-        GLib.timeout_add(600, self._finish_native_shortcut)
+        if not repeated:
+            # Act on the press at once so the first words are captured; only
+            # typing waits for the shortcut's modifiers to be released.
+            self._toggle_recording(None)
 
-    def _finish_native_shortcut(self) -> bool:
+    def _hold_typing_for_shortcut(self) -> None:
+        self.shortcut_down = True
+        if self.shortcut_guard:
+            GLib.source_remove(self.shortcut_guard)
+        self.shortcut_guard = GLib.timeout_add(600, self._shortcut_released)
+
+    def _shortcut_released(self) -> bool:
+        self.shortcut_guard = 0
         self.shortcut_down = False
-        if self.pending_toggle_stop:
-            self.pending_toggle_stop = False
-            self.stop_recording()
-        else:
-            self.start_recording()
+        if self.recorder and self.stream_raw:
+            # Type whatever was recognized while the modifiers were still held.
+            self._stream_update(self.stream_raw, False, False, False)
         return False
 
     def _set_status(self, text: str, error: bool = False) -> bool:
         LOG.error(text) if error else LOG.info(text)
+        self.status_text, self.status_error = text, error
         if self.status_label:
             self.status_label.set_text(text)
-        if hasattr(self, "indicator_status"):
+        if self.indicator_status:
             self.indicator_status.set_label(text[:100])
         if self.indicator:
             icon = "dialog-error-symbolic" if error else "audio-input-microphone-symbolic"
             self.indicator.set_icon_full(icon, text)
         return False
 
-    def _ready_status(self) -> str:
-        shortcut = self.shortcut_description or "the configured shortcut"
-        return f"Ready — tap {shortcut}  ·  {self.server.backend_label}"
+    def _sync_record_controls(self) -> None:
+        label = "Stop Dictation" if self.recorder else "Start Dictation"
+        if self.record_button:
+            self.record_button.set_label(label)
+            self.record_button.set_sensitive(bool(self.recorder) or (self.ready and not self.busy))
+        if self.indicator_dictate:
+            self.indicator_dictate.set_label(label)
+        # Switching engines mid-dictation is refused, so reflect that in the UI.
+        self._refresh_model_ui()
 
-    def _shortcut_status(self, text: str, error: bool = False) -> bool:
-        if error:
-            return self._set_status(text, True)
-        self.shortcut_description = text.removeprefix("Ready — hold ").removeprefix("Ready — tap ")
-        return self._set_status(
-            self._ready_status() if self.ready else
-            f"Shortcut set to {self.shortcut_description}; loading model…"
-        )
+    def _shortcut_text(self) -> str:
+        return self.shortcut_description or "the Purr shortcut"
+
+    def _show_ready(self) -> None:
+        # Without the virtual keyboard nothing can be typed, so never claim Ready.
+        if not self.keyboard:
+            self._set_status("Text injection unavailable — check /dev/uinput access", True)
+        else:
+            self._set_status(self._ready_status())
+
+    def _ready_status(self) -> str:
+        if not self.shortcut_description:
+            return f"Ready — set a shortcut with Shortcut…  ·  {self.server.backend_label}"
+        return f"Ready — tap {self.shortcut_description} to dictate  ·  {self.server.backend_label}"
+
+    def _shortcut_changed(self, binding: str) -> None:
+        self.shortcut_description = shortcut_label(binding) if binding else None
+        if self.ready and not self.busy and not self.recorder:
+            self._show_ready()
+        elif not self.ready and not self.engine_error:
+            self._set_status(f"Loading {self.model.name}…")
+
+    def _unavailable_reason(self) -> str:
+        if self.engine_error:
+            return f"The transcription engine did not start: {self.engine_error}"
+        if not self.ready:
+            return "Still loading the transcription model — try again in a moment"
+        return "Still finishing the previous dictation — try again in a moment"
 
     def _notify(self, title: str, body: str) -> None:
         subprocess.Popen(
@@ -910,10 +839,10 @@ class PurrApplication(Gtk.Application):
     def _server_ready(self) -> bool:
         self.ready = True
         self.busy = False
-        self._set_status(self._ready_status())
-        if self.record_button:
-            self.record_button.set_sensitive(True)
-        if hasattr(self, "indicator_model"):
+        self.engine_error = None
+        self._show_ready()
+        self._sync_record_controls()
+        if self.indicator_model:
             self.indicator_model.set_label(self.model.name)
         self._refresh_model_ui()
         return False
@@ -921,7 +850,9 @@ class PurrApplication(Gtk.Application):
     def _server_failed(self, message: str) -> bool:
         self.ready = False
         self.busy = False
+        self.engine_error = message
         self._set_status(message, True)
+        self._sync_record_controls()
         self._notify("Purr could not start", message)
         self._refresh_model_ui()
         return False
@@ -942,7 +873,13 @@ class PurrApplication(Gtk.Application):
         return source
 
     def start_recording(self) -> None:
-        if not self.ready or self.busy or self.recorder:
+        if self.recorder:
+            return
+        if not self.ready or self.busy:
+            # A tap that cannot start must say why; silence looks like a broken shortcut.
+            reason = self._unavailable_reason()
+            LOG.info("Dictation not started: %s", reason)
+            self._notify("Purr isn't ready", reason)
             return
         if not self.keyboard:
             message = "Text injection unavailable — check /dev/uinput access"
@@ -978,13 +915,14 @@ class PurrApplication(Gtk.Application):
                     ],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-            self._set_status("Listening live… tap the shortcut again to finish")
-            self.indicator.set_icon_full("media-record-symbolic", "Purr is listening")
-            if self.record_button:
-                self.record_button.set_label("Stop Dictation")
+            self._set_status(f"Listening… tap {self._shortcut_text()} again to finish")
+            if self.indicator:
+                self.indicator.set_icon_full("media-record-symbolic", "Purr is listening")
+            self._sync_record_controls()
         except Exception as error:
             LOG.exception("Could not start microphone")
             self.recorder = None
+            self._sync_record_controls()
             self._hide_overlay()
             self._set_status(f"Microphone error: {error}", True)
             self._notify("Purr microphone error", str(error))
@@ -995,11 +933,10 @@ class PurrApplication(Gtk.Application):
         recorder = self.recorder
         self.recorder = None
         self.busy = True
-        if self.record_button:
-            self.record_button.set_label("Start Dictation")
-            self.record_button.set_sensitive(False)
+        self._sync_record_controls()
         self._set_status("Finalizing transcript…" if self.server.streaming else "Transcribing…")
-        self.indicator.set_icon_full("emblem-synchronizing-symbolic", "Purr is transcribing")
+        if self.indicator:
+            self.indicator.set_icon_full("emblem-synchronizing-symbolic", "Purr is transcribing")
         try:
             recorder.send_signal(signal.SIGINT)
         except ProcessLookupError:
@@ -1074,11 +1011,7 @@ class PurrApplication(Gtk.Application):
             self.overlay_label.set_text(preview)
         if self.last_label:
             self.last_label.set_text(transcript_preview(text) or "Listening…")
-        live_safe = (
-            not self.shortcut_down
-            and not self.pending_toggle_stop
-        )
-        if live_safe:
+        if not self.shortcut_down:
             self._apply_stream_typing(text, drop_previous)
         return False
 
@@ -1111,10 +1044,12 @@ class PurrApplication(Gtk.Application):
     ) -> bool:
         if self.shutting_down:
             return False
+        if self.shortcut_down:
+            # The stop shortcut's modifiers may still be held; typing the final
+            # words now would turn them into Ctrl/Alt chords.
+            GLib.timeout_add(50, self._stream_finished, raw, duration, peak_db, error)
+            return False
         self.recorder = None
-        self.pending_toggle_stop = False
-        if self.record_button:
-            self.record_button.set_label("Start Dictation")
         if error:
             # Everything already typed was finalized by the engine. Keep it, so a
             # late failure cannot erase minutes of dictation.
@@ -1128,7 +1063,7 @@ class PurrApplication(Gtk.Application):
         self._stream_update(raw, False, False, True)
         text, _drop_previous = self.processor.apply(raw)
         LOG.info("Live transcript final=%r", text)
-        if text and self.keyboard:
+        if text and self.keyboard and not text.endswith("\n"):
             self.keyboard.type_text(" ")
         self._complete("", 0, None)
         if self.last_label and text:
@@ -1165,9 +1100,12 @@ class PurrApplication(Gtk.Application):
                     LOG.warning("Could not remove temporary recording %s", path)
 
     def _complete(self, text: str, drop_previous: int, message: str | None) -> bool:
+        if self.shortcut_down and (text or drop_previous):
+            # Batch results can arrive while the stop shortcut is still held.
+            GLib.timeout_add(50, self._complete, text, drop_previous, message)
+            return False
         self.busy = False
-        if self.record_button:
-            self.record_button.set_sensitive(self.ready)
+        self._sync_record_controls()
         if message:
             self._hide_overlay()
             self._set_status(message, message.startswith(("No microphone", "Transcription", "Could not")))
@@ -1182,7 +1120,7 @@ class PurrApplication(Gtk.Application):
                 self.keyboard.type_text(insertion)
             if self.last_label:
                 self.last_label.set_text(transcript_preview(text))
-        self._set_status(self._ready_status())
+        self._show_ready()
         return False
 
     def _selected_model(self):
@@ -1214,7 +1152,9 @@ class PurrApplication(Gtk.Application):
         self.model_action.set_label(
             "In use" if active else "Use model" if installed else f"Download & use ({selected.size_label})"
         )
-        self.model_action.set_sensitive(not active and not self.busy)
+        self.model_action.set_sensitive(
+            not active and not self.busy and not self.downloading and not self.recorder
+        )
         self.model_remove.set_sensitive(installed and not active and selected.engine != "whisper")
         return False
 
@@ -1223,7 +1163,8 @@ class PurrApplication(Gtk.Application):
         if self.store.installed(selected):
             self._activate_model(selected)
             return
-        self.busy = True
+        # Downloads run beside dictation; only switching engines needs Purr idle.
+        self.downloading = True
         self.model_action.set_sensitive(False)
         self.model_combo.set_sensitive(False)
         self.download_progress.set_fraction(0)
@@ -1251,13 +1192,17 @@ class PurrApplication(Gtk.Application):
     def _download_done(self, selected, error: str | None) -> bool:
         self.download_progress.hide()
         self.model_combo.set_sensitive(True)
-        self.busy = False
+        self.downloading = False
         if error:
             self._set_status(f"Download failed: {error}", True)
             self._refresh_model_ui()
         else:
             self._populate_model_combo(selected.id)
-            self._activate_model(selected)
+            if self.busy or self.recorder:
+                self._set_status(f"Downloaded {selected.name} — choose Use model after dictating")
+                self._refresh_model_ui()
+            else:
+                self._activate_model(selected)
         return False
 
     def _activate_model(self, selected) -> None:
@@ -1265,8 +1210,7 @@ class PurrApplication(Gtk.Application):
             return
         self.ready = False
         self.busy = True
-        if self.record_button:
-            self.record_button.set_sensitive(False)
+        self._sync_record_controls()
         self._set_status(f"Loading {selected.name}…")
         self.config["model"] = selected.id
         save_config(self.config)
@@ -1383,7 +1327,6 @@ def main() -> int:
     background = "--background" in sys.argv
     if background:
         sys.argv.remove("--background")
-    DBusGMainLoop(set_as_default=True)
     app = PurrApplication(background)
     try:
         return app.run(sys.argv)

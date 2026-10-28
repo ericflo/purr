@@ -1,11 +1,23 @@
 import array
 import json
-import tempfile
+import os
 from pathlib import Path
 import re
+import shutil
+import tempfile
+import time
 import unittest
 from unittest import mock
+import warnings
 import wave
+
+# purr_linux resolves its log and config paths at import time. Point them at a
+# sandbox so tests never write the user's real purr.log or config.json.
+SANDBOX = tempfile.mkdtemp(prefix="purr-tests-")
+os.environ["XDG_STATE_HOME"] = os.path.join(SANDBOX, "state")
+os.environ["XDG_CONFIG_HOME"] = os.path.join(SANDBOX, "config")
+
+from gi.repository import GLib
 
 import purr_linux
 from purr_linux import (
@@ -14,9 +26,26 @@ from purr_linux import (
     UInputKeyboard,
     multipart_body,
     normalize_wav,
+    shortcut_label,
     transcript_preview,
 )
-from purr_models import ModelSpec, ModelStore
+from purr_models import DEFAULT_MODEL_ID, MODEL_BY_ID, ModelSpec, ModelStore
+
+
+def tearDownModule():
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+
+
+def run_main_loop(seconds):
+    context = GLib.MainContext.default()
+    deadline = time.monotonic() + seconds
+    with warnings.catch_warnings():
+        # PyGObject's asyncio shim warns about deprecated asyncio policy APIs on
+        # Python 3.14 on every iteration; it is unrelated to Purr.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        while time.monotonic() < deadline:
+            if not context.iteration(False):
+                time.sleep(0.005)
 
 
 class ScreenKeyboard:
@@ -38,22 +67,13 @@ class ScreenKeyboard:
 
 
 def live_app(keyboard):
-    app = PurrApplication.__new__(PurrApplication)
-    app.config = {}
-    app.processor = PostProcessor(app.config)
+    engine = mock.Mock(streaming=True, backend_label="test engine")
+    with mock.patch.object(
+        purr_linux, "create_engine", return_value=(engine, MODEL_BY_ID[DEFAULT_MODEL_ID])
+    ):
+        app = PurrApplication(background=False)
     app.keyboard = keyboard
-    app.server = mock.Mock(streaming=True, backend_label="test engine")
-    app.shortcut_description = None
-    app.overlay = app.overlay_label = app.last_label = None
-    app.status_label = app.record_button = app.indicator = None
-    app.stream_raw = app.stream_typed = ""
-    app.stream_external_drops = 0
-    app.pending_toggle_stop = False
-    app.shortcut_down = False
-    app.shutting_down = False
     app.ready = True
-    app.busy = False
-    app.recorder = None
     app.notifications = []
     app._notify = lambda title, body: app.notifications.append((title, body))
     return app
@@ -162,6 +182,78 @@ class LinuxIntegrationTests(unittest.TestCase):
         app._stream_update("hello", False, False, False)
         self.assertEqual(app.keyboard.typed, ["hello"])
         self.assertEqual(app.stream_typed, "hello")
+
+    def test_shortcut_starts_on_press_and_types_once_modifiers_are_up(self):
+        app = live_app(ScreenKeyboard())
+        starts = []
+
+        def start_recording():
+            starts.append(time.monotonic())
+            app.recorder = mock.Mock()
+
+        app.start_recording = start_recording
+        pressed = time.monotonic()
+        app._native_shortcut(None, None)
+        self.assertEqual(len(starts), 1)
+        self.assertLess(starts[0] - pressed, 0.05)
+        # Words recognized while Ctrl+Alt may still be held wait for release.
+        app._stream_update("first words", False, False, False)
+        self.assertEqual(app.keyboard.screen, "")
+        # A repeating key extends the guard instead of toggling dictation off.
+        app._native_shortcut(None, None)
+        self.assertEqual(len(starts), 1)
+        run_main_loop(0.8)
+        self.assertFalse(app.shortcut_down)
+        self.assertEqual(app.keyboard.screen, "first words")
+
+    def test_stop_shortcut_types_final_words_after_modifiers_are_up(self):
+        app = live_app(ScreenKeyboard())
+        app.busy = True
+        app._hold_typing_for_shortcut()
+        app._stream_finished("final words", 4.0, -3.0, None)
+        self.assertEqual(app.keyboard.screen, "")
+        self.assertTrue(app.busy)
+        run_main_loop(0.8)
+        self.assertEqual(app.keyboard.screen, "final words ")
+        self.assertFalse(app.busy)
+
+    def test_final_new_paragraph_is_not_followed_by_a_space(self):
+        app = live_app(ScreenKeyboard())
+        app._stream_finished("first line new paragraph", 3.0, -3.0, None)
+        self.assertEqual(app.keyboard.screen, "first line\n\n")
+
+    def test_tap_that_cannot_start_explains_why(self):
+        app = live_app(ScreenKeyboard())
+        app.ready = False
+        app.start_recording()
+        self.assertIsNone(app.recorder)
+        self.assertEqual(app.notifications[-1][0], "Purr isn't ready")
+        self.assertIn("loading", app.notifications[-1][1])
+        app.ready, app.busy = True, True
+        app.start_recording()
+        self.assertIn("finishing", app.notifications[-1][1])
+        app.ready, app.busy, app.engine_error = False, False, "no Vulkan device"
+        app.start_recording()
+        self.assertIn("no Vulkan device", app.notifications[-1][1])
+
+    def test_shortcut_is_shown_the_way_people_type_it(self):
+        self.assertEqual(shortcut_label("<Control><Alt>space"), "Ctrl+Alt+Space")
+        app = live_app(ScreenKeyboard())
+        app._shortcut_changed("<Super>d")
+        self.assertIn("tap Super+D to dictate", app.status_text)
+        app._shortcut_changed("")
+        self.assertIn("set a shortcut", app.status_text)
+
+    def test_missing_virtual_keyboard_is_never_reported_as_ready(self):
+        app = live_app(None)
+        app._shortcut_changed("<Control><Alt>space")
+        app._server_ready()
+        self.assertIn("uinput", app.status_text)
+        self.assertTrue(app.status_error)
+
+    def test_tests_never_touch_the_real_log_or_config(self):
+        self.assertTrue(str(purr_linux.STATE).startswith(SANDBOX))
+        self.assertTrue(str(purr_linux.CONFIG_FILE).startswith(SANDBOX))
 
     def test_long_live_stream_types_every_word_in_place(self):
         app = live_app(ScreenKeyboard())

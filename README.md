@@ -130,8 +130,10 @@ engines with Vulkan, downloads NVIDIA Nemotron 3.5 Streaming Q5 plus Whisper
 Large V3 Turbo Q5 as a fallback, installs the user launcher and autostart entry,
 and runs the test and smoke-test suite.
 
-Nemotron is the default: after the first tap, cache-aware transcription is typed
-directly into the focused application through Purr's virtual keyboard. Linux
+Nemotron is the default: the microphone opens the instant you tap the shortcut,
+so you can start talking immediately, and cache-aware transcription is typed
+directly into the focused application through Purr's virtual keyboard, with no
+time limit on a dictation. Linux
 Unicode compose is used for accents, symbols, and non-Latin text, avoiding
 background Wayland clipboard restrictions. Say “scratch that” to remove the
 preceding dictated word immediately. The second tap finalizes the stream. The
