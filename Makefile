@@ -61,8 +61,6 @@ PARAKEET_DIR   := $(LINUX_BUILD)/parakeet.cpp
 PARAKEET_LIB   := $(PARAKEET_DIR)/build/libparakeet.so
 NEMOTRON_MODEL := $(LINUX_BUILD)/models/nemotron-3.5-asr-streaming-0.6b-q5_k.gguf
 NEMOTRON_URL   := https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/bf0af9f425fa01809cadec671b3cb672709d13e9/nemotron-3.5-asr-streaming-0.6b-q5_k.gguf
-WL_CLIPBOARD_DIR := $(LINUX_BUILD)/wl-clipboard
-WL_COPY         := $(WL_CLIPBOARD_DIR)/usr/bin/wl-copy
 LINUX_APP_ID   := com.arunbrahma.purr
 LINUX_EXEC     := $(CURDIR)/linux/purr
 
@@ -117,15 +115,7 @@ $(NEMOTRON_MODEL):
 	  test "$$(stat -c %s "$$partial")" = "784801888" || { rm -f "$$partial"; echo "Nemotron download was incomplete"; exit 1; }; \
 	  mv "$$partial" "$@"
 
-$(WL_COPY):
-	@mkdir -p $(LINUX_BUILD)/wl-clipboard-pkg $(WL_CLIPBOARD_DIR)
-	@package_url="$$(pacman -Sp --print-format '%l' wl-clipboard | tail -n 1)"; \
-	  test -n "$$package_url"; \
-	  curl --fail --location --output $(LINUX_BUILD)/wl-clipboard-pkg/wl-clipboard.pkg.tar.zst "$$package_url"
-	bsdtar -xf $(LINUX_BUILD)/wl-clipboard-pkg/wl-clipboard.pkg.tar.zst -C $(WL_CLIPBOARD_DIR)
-	$(WL_COPY) --version
-
-linux: $(WHISPER_BIN) $(WHISPER_MODEL) $(PARAKEET_LIB) $(NEMOTRON_MODEL) $(WL_COPY)
+linux: $(WHISPER_BIN) $(WHISPER_MODEL) $(PARAKEET_LIB) $(NEMOTRON_MODEL)
 	chmod +x linux/purr
 	@echo "Built Purr for Linux (Vulkan + NVIDIA Nemotron live streaming + Whisper fallback)."
 

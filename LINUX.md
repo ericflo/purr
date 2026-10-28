@@ -14,9 +14,9 @@ The current supported and tested combination is:
 - a working Vulkan 1.3 driver
 - PipeWire with PulseAudio compatibility
 
-The code is intentionally small and may work elsewhere, but the installer is
-Arch-specific (`pacman` is used to obtain `wl-clipboard`), and the global
-shortcut integration uses GNOME GSettings. X11, other desktop environments,
+The code is intentionally small and may work elsewhere, but the documented
+prerequisites use `pacman`, and the global shortcut integration uses GNOME
+GSettings. X11, other desktop environments,
 other distributions, and ARM Linux are not currently tested.
 
 Linux currently includes dictation, live typing, model selection, microphone
@@ -90,10 +90,8 @@ purr
 1. Clones pinned `parakeet.cpp` and `whisper.cpp` release tags into
    `.build-linux/` and builds both with Vulkan.
 2. Downloads the default Nemotron streaming model and the Whisper fallback.
-3. Extracts a private copy of Arch's `wl-clipboard` package into the build
-   directory; it does not install that package system-wide.
-4. Runs the Python unit tests and a runtime smoke test.
-5. Adds a `~/.local/bin/purr` symlink, desktop entry, GNOME sign-in autostart
+3. Runs the Python unit tests and a runtime smoke test.
+4. Adds a `~/.local/bin/purr` symlink, desktop entry, GNOME sign-in autostart
    entry, and the GNOME custom shortcut.
 
 The launcher points back into the checkout, so keep the repository in the same
@@ -113,13 +111,13 @@ the settings window is closed and starts automatically on future sign-ins.
 
 1. Focus a normal text field.
 2. Tap <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> to begin.
-3. Speak. With live typing enabled, finalized words appear as they are decoded.
+3. Speak. Finalized words are typed into the focused app as they are decoded.
+   There is no time limit; pauses do not end dictation.
 4. Tap the shortcut again to finish the stream.
 
 Click **Shortcut…** in Purr to open GNOME's keyboard settings. Purr preserves a
-shortcut changed there. The **Type finalized words directly into the focused
-app** switch disables incremental typing; the final result is inserted when the
-utterance ends instead.
+shortcut changed there. All text is typed through Purr's virtual keyboard; Purr
+never reads or writes the clipboard.
 
 Spoken commands include “new paragraph,” “new line,” punctuation names, and
 “scratch that.” The last command removes the preceding dictated word, including
@@ -162,7 +160,7 @@ Linux files are stored in these locations:
 
 | Path | Contents |
 | --- | --- |
-| `<checkout>/.build-linux/` | Compiled engines, downloaded models, and private `wl-clipboard` binaries |
+| `<checkout>/.build-linux/` | Compiled engines and downloaded models |
 | `~/.config/purr/config.json` | Model, language, microphone, and dictation preferences |
 | `~/.local/state/purr/purr.log` | Rotating application log |
 | `~/.local/state/purr/whisper-server.log` | Whisper engine log |
@@ -181,7 +179,6 @@ The GUI writes `~/.config/purr/config.json`. Supported keys are:
 - `model`: a model ID from `linux/purr_models.py`
 - `language`: recognition language code or `auto`
 - `microphone`: PipeWire/Pulse source name or `default`
-- `live_typing`: type stable partial results while streaming
 - `trim_fillers`: remove common fillers such as “um” and “uh”
 - `voice_commands`: enable spoken punctuation and “scratch that”
 - `dictionary`: JSON object mapping spoken forms to replacements
@@ -219,9 +216,8 @@ logs should not be retained.
 - If the shortcut does nothing, open GNOME Settings → Keyboard → Custom
   Shortcuts and confirm that “Purr Dictation” invokes
   `gapplication action com.arunbrahma.purr dictate`.
-- If direct typing fails, recheck `/dev/uinput` access. The final insertion can
-  fall back to a short-lived Wayland clipboard handoff, but live typing needs
-  the virtual keyboard.
+- If direct typing fails, recheck `/dev/uinput` access. Purr types only through
+  its virtual keyboard, so dictation will not start without it.
 - If a batch model feels unresponsive, remember that it emits text only after
   the stop shortcut. Use Nemotron or Realtime EOU for live output.
 

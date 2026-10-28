@@ -49,9 +49,6 @@ WHISPER_SERVER = WHISPER_BIN / "whisper-server"
 MODEL = BUILD / "models" / "ggml-large-v3-turbo-q5_0.bin"
 PARAKEET_LIB = BUILD / "parakeet.cpp" / "build" / "libparakeet.so"
 NEMOTRON_MODEL = BUILD / "models" / "nemotron-3.5-asr-streaming-0.6b-q5_k.gguf"
-WL_CLIPBOARD_BIN = BUILD / "wl-clipboard" / "usr" / "bin"
-WL_COPY = WL_CLIPBOARD_BIN / "wl-copy"
-WL_PASTE = WL_CLIPBOARD_BIN / "wl-paste"
 ICON = ROOT / "Resources" / "purr_app_logo.png"
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / "purr"
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "purr"
@@ -76,7 +73,6 @@ LOG = setup_logging()
 DEFAULT_CONFIG = {
     "language": "en",
     "model": DEFAULT_MODEL_ID,
-    "live_typing": True,
     "show_overlay": False,
     "microphone": "default",
     "trim_fillers": True,
@@ -96,6 +92,8 @@ def load_config() -> dict:
         pass
     except Exception:
         LOG.exception("Ignoring invalid config at %s", CONFIG_FILE)
+    # Dictation always types live now; drop the retired clipboard-mode toggle.
+    config.pop("live_typing", None)
     return config
 
 
@@ -211,10 +209,19 @@ class PostProcessor:
                         text,
                         flags=re.IGNORECASE,
                     )
+        # The virtual keyboard is the only insertion path, and control
+        # characters have no key or Unicode-compose form.
+        if not text.replace("\n", " ").replace("\t", " ").isprintable():
+            text = "".join(char for char in text if char.isprintable() or char in "\n\t")
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"[ \t]+([,.?!…])", r"\1", text)
         text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
         return text.strip(" \t"), drop_previous
+
+
+def transcript_preview(text: str, limit: int = 280) -> str:
+    """Show only the tail so minutes of dictation cannot grow wrapped labels."""
+    return text if len(text) <= limit else "…" + text[-limit:].lstrip()
 
 
 def normalize_wav(path: Path) -> tuple[float, float]:
@@ -268,7 +275,7 @@ def multipart_body(path: Path, fields: dict[str, str]) -> tuple[bytes, str]:
 
 
 class UInputKeyboard:
-    """Wayland-safe virtual keyboard for direct live typing and paste fallback."""
+    """Wayland-safe virtual keyboard for direct live typing."""
 
     UI_SET_EVBIT = 0x40045564
     UI_SET_KEYBIT = 0x40045565
@@ -280,7 +287,6 @@ class UInputKeyboard:
     SYN_REPORT = 0
     KEY_LEFTCTRL = 29
     KEY_LEFTSHIFT = 42
-    KEY_V = 47
     KEY_BACKSPACE = 14
     KEY_ENTER = 28
     KEY_TAB = 15
@@ -334,12 +340,6 @@ class UInputKeyboard:
         self._key(code, False)
         if shift:
             self._key(self.KEY_LEFTSHIFT, False)
-
-    def paste(self) -> None:
-        with self.lock:
-            self._key(self.KEY_LEFTCTRL, True)
-            self._tap(self.KEY_V)
-            self._key(self.KEY_LEFTCTRL, False)
 
     def backspace(self, count: int) -> None:
         with self.lock:
@@ -406,104 +406,6 @@ class UInputKeyboard:
                 fcntl.ioctl(self.device, self.UI_DEV_DESTROY)
             finally:
                 self.device.close()
-
-
-class TextInserter:
-    def __init__(self, keyboard: UInputKeyboard):
-        self.keyboard = keyboard
-        self.clipboard_owner: subprocess.Popen | None = None
-        self.generation = 0
-
-    def _stop_owner(self) -> None:
-        owner, self.clipboard_owner = self.clipboard_owner, None
-        if owner and owner.poll() is None:
-            owner.terminate()
-            try:
-                owner.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                owner.kill()
-                owner.wait(timeout=1)
-
-    def _claim(self, contents: bytes) -> None:
-        self._stop_owner()
-        owner = subprocess.Popen(
-            [str(WL_COPY), "--foreground", "--type", "text/plain;charset=utf-8"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            owner.stdin.write(contents)
-            owner.stdin.close()
-        except Exception:
-            owner.kill()
-            owner.wait(timeout=1)
-            raise
-        self.clipboard_owner = owner
-
-    def insert(self, text: str) -> None:
-        encoded = text.encode("utf-8")
-        previous = None
-        self.generation += 1
-        generation = self.generation
-        try:
-            snapshot = subprocess.run(
-                [str(WL_PASTE), "--no-newline"], capture_output=True, timeout=0.5
-            )
-            previous = snapshot.stdout if snapshot.returncode == 0 else None
-        except Exception:
-            # An empty or stale Wayland selection can wait indefinitely on
-            # some compositors. It is safe to proceed without a snapshot.
-            LOG.info("No restorable Wayland clipboard contents were available")
-        try:
-            self._claim(encoded)
-        except Exception:
-            LOG.exception("Could not claim the Wayland clipboard")
-            return
-
-        attempts = 0
-
-        def send_paste():
-            nonlocal attempts
-            attempts += 1
-            # A background Wayland client cannot assume clipboard ownership is
-            # immediate. Verify the offer from a separate client before sending
-            # Ctrl+V; otherwise the target can consume the previous clipboard.
-            try:
-                current = subprocess.run(
-                    [str(WL_PASTE), "--no-newline"], capture_output=True, timeout=0.15
-                )
-                ready = current.returncode == 0 and current.stdout == encoded
-            except Exception:
-                ready = False
-            if not ready and attempts < 8:
-                GLib.timeout_add(40, send_paste)
-                return False
-            if not ready:
-                LOG.error("Wayland clipboard ownership did not become active; paste skipped")
-                self._stop_owner()
-                return False
-            self.keyboard.paste()
-            GLib.timeout_add(1200, restore)
-            return False
-
-        def restore():
-            if generation != self.generation:
-                return False
-            if previous is not None:
-                try:
-                    self._claim(previous)
-                except Exception:
-                    LOG.exception("Could not restore the previous Wayland clipboard")
-            else:
-                self._stop_owner()
-            return False
-
-        GLib.timeout_add(25, send_paste)
-
-    def close(self) -> None:
-        self.generation += 1
-        self._stop_owner()
 
 
 class GlobalShortcuts:
@@ -682,7 +584,6 @@ class PurrApplication(Gtk.Application):
         self.store = ModelStore(BUILD)
         self.server, self.model = create_engine(self.config, BUILD, STATE, self.store)
         self.keyboard: UInputKeyboard | None = None
-        self.inserter: TextInserter | None = None
         self.shortcuts: GnomeShortcut | None = None
         self.recorder: subprocess.Popen | None = None
         self.recording_path: Path | None = None
@@ -691,15 +592,12 @@ class PurrApplication(Gtk.Application):
         self.busy = False
         self.shutting_down = False
         self.shortcut_description: str | None = None
-        self.last_inserted = ""
         self.stream_typed = ""
         self.stream_raw = ""
         self.stream_external_drops = 0
-        self.stream_direct_failed = False
         self.shortcut_down = False
         self.shortcut_pressed_at = 0.0
         self.pending_toggle_stop = False
-        self.recording_token = 0
         self.window = self.overlay = None
         self.status_label = self.last_label = self.overlay_label = None
         self.record_button = self.model_combo = self.model_action = None
@@ -717,7 +615,6 @@ class PurrApplication(Gtk.Application):
         self.add_action(dictate_action)
         try:
             self.keyboard = UInputKeyboard()
-            self.inserter = TextInserter(self.keyboard)
         except Exception as error:
             LOG.exception("uinput setup failed")
             self._set_status(f"Text injection unavailable: {error}", True)
@@ -849,23 +746,8 @@ class PurrApplication(Gtk.Application):
 
         options = Gtk.Grid(column_spacing=14, row_spacing=10)
         options.set_border_width(4)
-        live_label = Gtk.Label(label="Type finalized words directly into the focused app", xalign=0)
-        live_label.set_tooltip_text(
-            "Uses Purr's virtual keyboard, including Linux Unicode compose for multilingual text."
-        )
-        options.attach(live_label, 0, 0, 1, 1)
-        live_switch = Gtk.Switch(active=bool(self.config.get("live_typing", True)))
-        # Gtk.Grid gives this column the width requested by the long microphone
-        # combo below it. A Switch defaults to filling that allocation, which
-        # makes some GTK themes draw a comically wide track and thumb. Keep it
-        # at its natural control size and align it with the other inputs.
-        live_switch.set_halign(Gtk.Align.END)
-        live_switch.set_valign(Gtk.Align.CENTER)
-        live_switch.set_hexpand(False)
-        live_switch.connect("notify::active", self._live_typing_changed)
-        options.attach(live_switch, 1, 0, 1, 1)
         language_label = Gtk.Label(label="Recognition language", xalign=0)
-        options.attach(language_label, 0, 1, 1, 1)
+        options.attach(language_label, 0, 0, 1, 1)
         language = Gtk.ComboBoxText()
         for code, name in (
             ("en", "English"), ("auto", "Automatic"), ("es", "Spanish"),
@@ -875,9 +757,9 @@ class PurrApplication(Gtk.Application):
             language.append(code, name)
         language.set_active_id(str(self.config.get("language", "en")))
         language.connect("changed", self._language_changed)
-        options.attach(language, 1, 1, 1, 1)
+        options.attach(language, 1, 0, 1, 1)
         microphone_label = Gtk.Label(label="Microphone", xalign=0)
-        options.attach(microphone_label, 0, 2, 1, 1)
+        options.attach(microphone_label, 0, 1, 1, 1)
         self.microphone_combo = Gtk.ComboBoxText()
         microphones = list_microphones()
         try:
@@ -897,11 +779,11 @@ class PurrApplication(Gtk.Application):
         if not self.microphone_combo.set_active_id(selected_microphone):
             self.microphone_combo.set_active_id("default")
         self.microphone_combo.connect("changed", self._microphone_changed)
-        options.attach(self.microphone_combo, 1, 2, 1, 1)
+        options.attach(self.microphone_combo, 1, 1, 1, 1)
         commands = Gtk.CheckButton(label='Enable voice commands, including “scratch that”')
         commands.set_active(bool(self.config.get("voice_commands", True)))
         commands.connect("toggled", self._commands_changed)
-        options.attach(commands, 0, 3, 2, 1)
+        options.attach(commands, 0, 2, 2, 1)
         outer.pack_start(options, False, False, 0)
 
         note = Gtk.Label(
@@ -1062,13 +944,17 @@ class PurrApplication(Gtk.Application):
     def start_recording(self) -> None:
         if not self.ready or self.busy or self.recorder:
             return
+        if not self.keyboard:
+            message = "Text injection unavailable — check /dev/uinput access"
+            self._set_status(message, True)
+            self._notify("Purr cannot type", message)
+            return
         try:
             RUNTIME.mkdir(parents=True, exist_ok=True)
             source = self._default_source()
             self.stream_typed = ""
             self.stream_raw = ""
             self.stream_external_drops = 0
-            self.stream_direct_failed = False
             self._show_overlay()
             if self.server.streaming:
                 stream = self.server.begin_stream()
@@ -1096,8 +982,6 @@ class PurrApplication(Gtk.Application):
             self.indicator.set_icon_full("media-record-symbolic", "Purr is listening")
             if self.record_button:
                 self.record_button.set_label("Stop Dictation")
-            self.recording_token += 1
-            GLib.timeout_add_seconds(180, self._recording_watchdog, self.recording_token)
         except Exception as error:
             LOG.exception("Could not start microphone")
             self.recorder = None
@@ -1133,13 +1017,6 @@ class PurrApplication(Gtk.Application):
                 self._transcribe(path)
 
             threading.Thread(target=finish_recording, daemon=True).start()
-
-    def _recording_watchdog(self, token: int) -> bool:
-        if token == self.recording_token and self.recorder:
-            LOG.error("Recording watchdog finalized a stuck three-minute session")
-            self._notify("Purr finalized a stuck recording", "The stop shortcut was not received.")
-            self.stop_recording()
-        return False
 
     def _consume_stream(self, recorder, stream) -> None:
         raw_text = ""
@@ -1192,11 +1069,11 @@ class PurrApplication(Gtk.Application):
     def _stream_update(self, raw: str, eou: bool, eob: bool, final: bool) -> bool:
         self.stream_raw = raw
         text, drop_previous = self.processor.apply(raw)
-        preview = text or ("End of utterance…" if eou else "Listening…")
+        preview = transcript_preview(text) or ("End of utterance…" if eou else "Listening…")
         if self.overlay_label:
             self.overlay_label.set_text(preview)
         if self.last_label:
-            self.last_label.set_text(text or "Listening…")
+            self.last_label.set_text(transcript_preview(text) or "Listening…")
         live_safe = (
             not self.shortcut_down
             and not self.pending_toggle_stop
@@ -1206,33 +1083,28 @@ class PurrApplication(Gtk.Application):
         return False
 
     def _apply_stream_typing(self, text: str, drop_previous: int) -> None:
-        direct = bool(self.config.get("live_typing", True)) and self.keyboard
-        if direct and not self.stream_direct_failed:
-            if drop_previous > self.stream_external_drops:
-                self.keyboard.backspace_word(drop_previous - self.stream_external_drops)
-                self.stream_external_drops = drop_previous
-            common = 0
-            limit = min(len(self.stream_typed), len(text))
-            while common < limit and self.stream_typed[common] == text[common]:
-                common += 1
-            removed = len(self.stream_typed) - common
-            if removed:
-                self.keyboard.backspace(removed)
-            addition = text[common:]
-            if addition and not self.keyboard.type_text(addition):
-                # Roll the partial direct transcript back; final insertion will use
-                # the Unicode-safe clipboard handoff.
-                if common:
-                    self.keyboard.backspace(common)
-                self.stream_typed = ""
-                self.stream_direct_failed = True
-            else:
-                self.stream_typed = text
-                if addition or removed:
-                    LOG.info(
-                        "Live injection updated: +%d chars, -%d chars, %d total",
-                        len(addition), removed, len(text),
-                    )
+        if not self.keyboard:
+            return
+        if drop_previous > self.stream_external_drops:
+            self.keyboard.backspace_word(drop_previous - self.stream_external_drops)
+            self.stream_external_drops = drop_previous
+        common = 0
+        limit = min(len(self.stream_typed), len(text))
+        while common < limit and self.stream_typed[common] == text[common]:
+            common += 1
+        removed = len(self.stream_typed) - common
+        if removed:
+            self.keyboard.backspace(removed)
+        addition = text[common:]
+        if addition:
+            # PostProcessor output contains only typeable characters.
+            self.keyboard.type_text(addition)
+        self.stream_typed = text
+        if addition or removed:
+            LOG.info(
+                "Live injection updated: +%d chars, -%d chars, %d total",
+                len(addition), removed, len(text),
+            )
 
     def _stream_finished(
         self, raw: str, duration: float, peak_db: float, error: str | None
@@ -1244,8 +1116,8 @@ class PurrApplication(Gtk.Application):
         if self.record_button:
             self.record_button.set_label("Start Dictation")
         if error:
-            if self.stream_typed and self.keyboard:
-                self.keyboard.backspace(len(self.stream_typed))
+            # Everything already typed was finalized by the engine. Keep it, so a
+            # late failure cannot erase minutes of dictation.
             return self._complete("", 0, error)
         if duration < 0.20:
             return self._complete("", 0, "Too short — speak for a moment before stopping")
@@ -1254,23 +1126,13 @@ class PurrApplication(Gtk.Application):
                 self.keyboard.backspace(len(self.stream_typed))
             return self._complete("", 0, "No speech detected")
         self._stream_update(raw, False, False, True)
-        text, drop_previous = self.processor.apply(raw)
+        text, _drop_previous = self.processor.apply(raw)
         LOG.info("Live transcript final=%r", text)
-        direct_ok = (
-            bool(self.config.get("live_typing", True))
-            and not self.stream_direct_failed
-        )
-        if direct_ok and self.keyboard:
-            if text:
-                self.keyboard.type_text(" ")
-                self.last_inserted = text + " "
-            self._complete("", 0, None)
-        else:
-            self._complete(
-                text, max(0, drop_previous - self.stream_external_drops), None
-            )
+        if text and self.keyboard:
+            self.keyboard.type_text(" ")
+        self._complete("", 0, None)
         if self.last_label and text:
-            self.last_label.set_text(text)
+            self.last_label.set_text(transcript_preview(text))
         GLib.timeout_add(700, self._hide_overlay)
         return False
 
@@ -1316,14 +1178,10 @@ class PurrApplication(Gtk.Application):
             self.keyboard.backspace_word(drop_previous)
         if text:
             insertion = text if text.endswith(("\n", "\t", " ")) else text + " "
-            inserted = bool(self.keyboard and self.keyboard.type_text(insertion))
-            if not inserted and self.inserter:
-                self.inserter.insert(insertion)
-                inserted = True
-            if inserted:
-                self.last_inserted = insertion
+            if self.keyboard:
+                self.keyboard.type_text(insertion)
             if self.last_label:
-                self.last_label.set_text(text)
+                self.last_label.set_text(transcript_preview(text))
         self._set_status(self._ready_status())
         return False
 
@@ -1436,10 +1294,6 @@ class PurrApplication(Gtk.Application):
         self._populate_model_combo(selected.id)
         self._refresh_model_ui()
 
-    def _live_typing_changed(self, switch, _property) -> None:
-        self.config["live_typing"] = switch.get_active()
-        save_config(self.config)
-
     def _language_changed(self, combo) -> None:
         if combo.get_active_id():
             self.config["language"] = combo.get_active_id()
@@ -1471,8 +1325,6 @@ class PurrApplication(Gtk.Application):
         if not self.stream_thread or not self.stream_thread.is_alive():
             self.server.stop()
         if self.keyboard:
-            if self.inserter:
-                self.inserter.close()
             self.keyboard.close()
         Gtk.Application.do_shutdown(self)
 
@@ -1484,8 +1336,6 @@ def smoke_test() -> int:
         ("Whisper model", MODEL),
         ("parakeet.cpp shared library", PARAKEET_LIB),
         ("Nemotron streaming model", NEMOTRON_MODEL),
-        ("Wayland clipboard writer", WL_COPY),
-        ("Wayland clipboard reader", WL_PASTE),
         ("application icon", ICON),
         ("uinput device", Path("/dev/uinput")),
     ):

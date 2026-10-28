@@ -1,17 +1,62 @@
 import array
+import json
 import tempfile
 from pathlib import Path
+import re
 import unittest
+from unittest import mock
 import wave
 
+import purr_linux
 from purr_linux import (
     PostProcessor,
     PurrApplication,
     UInputKeyboard,
     multipart_body,
     normalize_wav,
+    transcript_preview,
 )
 from purr_models import ModelSpec, ModelStore
+
+
+class ScreenKeyboard:
+    """Applies virtual keyboard edits to a string, like the focused text field."""
+
+    def __init__(self):
+        self.screen = ""
+
+    def type_text(self, text):
+        self.screen += text
+        return True
+
+    def backspace(self, count):
+        self.screen = self.screen[: max(0, len(self.screen) - count)]
+
+    def backspace_word(self, count=1):
+        for _ in range(count):
+            self.screen = re.sub(r"\S+\s*$", "", self.screen)
+
+
+def live_app(keyboard):
+    app = PurrApplication.__new__(PurrApplication)
+    app.config = {}
+    app.processor = PostProcessor(app.config)
+    app.keyboard = keyboard
+    app.server = mock.Mock(streaming=True, backend_label="test engine")
+    app.shortcut_description = None
+    app.overlay = app.overlay_label = app.last_label = None
+    app.status_label = app.record_button = app.indicator = None
+    app.stream_raw = app.stream_typed = ""
+    app.stream_external_drops = 0
+    app.pending_toggle_stop = False
+    app.shortcut_down = False
+    app.shutting_down = False
+    app.ready = True
+    app.busy = False
+    app.recorder = None
+    app.notifications = []
+    app._notify = lambda title, body: app.notifications.append((title, body))
+    return app
 
 
 class PostProcessorTests(unittest.TestCase):
@@ -45,6 +90,17 @@ class PostProcessorTests(unittest.TestCase):
             self.processor.apply("Hello. <en-US> This is Purr. <en-US>"),
             ("Hello. This is Purr.", 0),
         )
+
+    def test_output_is_always_typeable(self):
+        text, _ = self.processor.apply("café\0 — 日本語\x1b 🐈 new line done")
+        self.assertEqual(text, "café — 日本語 🐈\ndone")
+        self.assertTrue(UInputKeyboard.__new__(UInputKeyboard).can_type(text))
+
+    def test_transcript_preview_keeps_only_the_tail(self):
+        self.assertEqual(transcript_preview("short"), "short")
+        preview = transcript_preview("word " * 2000)
+        self.assertLessEqual(len(preview), 281)
+        self.assertTrue(preview.startswith("…"))
 
 
 class AudioTests(unittest.TestCase):
@@ -95,15 +151,7 @@ class LinuxIntegrationTests(unittest.TestCase):
                 self.typed.append(text)
                 return True
 
-        app = PurrApplication.__new__(PurrApplication)
-        app.config = {"live_typing": True}
-        app.processor = PostProcessor(app.config)
-        app.keyboard = Keyboard()
-        app.overlay_label = app.last_label = None
-        app.stream_raw = app.stream_typed = ""
-        app.stream_external_drops = 0
-        app.stream_direct_failed = False
-        app.pending_toggle_stop = False
+        app = live_app(Keyboard())
         app.shortcut_down = True
 
         app._stream_update("hello", False, False, False)
@@ -114,6 +162,48 @@ class LinuxIntegrationTests(unittest.TestCase):
         app._stream_update("hello", False, False, False)
         self.assertEqual(app.keyboard.typed, ["hello"])
         self.assertEqual(app.stream_typed, "hello")
+
+    def test_long_live_stream_types_every_word_in_place(self):
+        app = live_app(ScreenKeyboard())
+        raw = ""
+        # About fifteen minutes of dictation at a normal speaking rate.
+        with self.assertLogs("purr", "INFO"):
+            for index in range(2200):
+                raw += f" word{index}"
+                if index % 50 == 49:
+                    raw += " comma"
+                if index % 400 == 399:
+                    raw += " oops scratch that"
+                if index % 10 == 9:
+                    app._stream_update(raw, False, False, False)
+            app._stream_finished(raw, 900.0, -3.0, None)
+        expected, _ = app.processor.apply(raw)
+        self.assertEqual(app.keyboard.screen, expected + " ")
+        self.assertNotIn("oops", app.keyboard.screen)
+        self.assertIn("word2199", app.keyboard.screen)
+
+    def test_stream_error_keeps_already_typed_text(self):
+        app = live_app(ScreenKeyboard())
+        app._stream_update("minutes of finalized dictation", False, False, False)
+        app._stream_finished("minutes of finalized dictation", 600.0, -3.0, "engine failed")
+        self.assertEqual(app.keyboard.screen, "minutes of finalized dictation")
+        self.assertEqual(app.notifications, [("Purr dictation failed", "engine failed")])
+
+    def test_dictation_requires_the_virtual_keyboard(self):
+        app = live_app(None)
+        app.start_recording()
+        app.server.begin_stream.assert_not_called()
+        self.assertIsNone(app.recorder)
+        self.assertEqual(len(app.notifications), 1)
+
+    def test_retired_live_typing_toggle_is_dropped_from_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.json"
+            config_file.write_text(json.dumps({"live_typing": False, "language": "de"}))
+            with mock.patch.object(purr_linux, "CONFIG_FILE", config_file):
+                config = purr_linux.load_config()
+        self.assertNotIn("live_typing", config)
+        self.assertEqual(config["language"], "de")
 
     def test_live_keyboard_supports_unicode_and_rejects_controls(self):
         keyboard = UInputKeyboard.__new__(UInputKeyboard)

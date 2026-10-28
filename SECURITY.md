@@ -90,8 +90,6 @@ The Linux port has a smaller but still sensitive permission set:
   type and erase text in the focused application
 - **GNOME settings** - installs and updates a custom global shortcut that invokes Purr's
   application action
-- **Clipboard fallback** - can temporarily claim the Wayland clipboard when direct typing
-  cannot represent a final result, then attempts to restore the prior contents
 
 Purr's Linux shortcut does not monitor raw keyboard input: GNOME recognizes the configured
 shortcut and invokes a D-Bus application action. Temporary batch audio is deleted after
@@ -117,7 +115,7 @@ The updater refuses any download URL whose host is not exactly `github.com` over
 even if the GitHub API response names one.
 
 The Linux build additionally clones pinned engine tags from GitHub, downloads models from
-Hugging Face, and obtains an Arch `wl-clipboard` package URL from `pacman`. Optional model
+Hugging Face. Optional model
 downloads in the Linux GUI contact Hugging Face. The local Whisper HTTP process binds only
 to `127.0.0.1` on an ephemeral port.
 

@@ -163,8 +163,9 @@ used to fetch source dependencies, models, and macOS updates.
 <details>
 <summary><strong>Which mode is lowest-latency?</strong></summary>
 
-Use Parakeet with live typing enabled, so finalized words appear as you speak.
-On Linux, the default Nemotron model and optional Realtime EOU model stream;
+On macOS, use Parakeet with Smart Typing enabled, so finalized words appear as
+you speak. On Linux, the default Nemotron model and optional Realtime EOU model
+always type live;
 the batch Parakeet models and Whisper wait until the utterance finishes.
 
 </details>
